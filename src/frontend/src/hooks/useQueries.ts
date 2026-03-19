@@ -69,15 +69,11 @@ export function useSetProfile() {
 export function useTokenUniverse() {
   const { actor } = useActor();
 
-  // Warm the backend cache on mount and periodically via the canister timer
   useEffect(() => {
     if (!actor) return;
-    // Fire-and-forget: ask backend to refresh its HTTP-outcall caches
     (actor as { updateTokenUniverse?: () => Promise<void> })
       .updateTokenUniverse?.()
-      .catch(() => {
-        /* ignore — cache warm is best-effort */
-      });
+      .catch(() => {});
   }, [actor]);
 
   const query = useQuery<TokenUniverse>({
@@ -344,6 +340,7 @@ export function useExecuteSwap() {
       queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
       queryClient.invalidateQueries({ queryKey: ["realizedPnL"] });
       queryClient.invalidateQueries({ queryKey: ["unrealizedPnL"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioHistory"] });
     },
   });
 }
@@ -427,5 +424,106 @@ export function useBasketDrift(basketId: bigint | undefined) {
     enabled:
       !!actor && !isFetching && basketId !== undefined && !universeLoading,
     staleTime: 30_000,
+  });
+}
+
+// ── Portfolio History Hook ────────────────────────────────────────────────────
+
+export interface PortfolioSnapshot {
+  timestamp: number; // ms
+  totalValueUsd: number;
+}
+
+export function usePortfolioHistory(days: number) {
+  const { actor, isFetching } = useActor();
+  return useQuery<PortfolioSnapshot[]>({
+    queryKey: ["portfolioHistory", days],
+    queryFn: async () => {
+      if (!actor) return [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const raw = await (actor as any).getPortfolioHistory(BigInt(days));
+      if (!Array.isArray(raw)) return [];
+      return (raw as Array<{ timestamp: bigint; totalValueUsd: number }>)
+        .map((s) => ({
+          timestamp: Number(s.timestamp) / 1_000_000, // ns -> ms
+          totalValueUsd: s.totalValueUsd,
+        }))
+        .sort((a, b) => a.timestamp - b.timestamp);
+    },
+    enabled: !!actor && !isFetching,
+    staleTime: 30_000,
+  });
+}
+
+// ── Wallet: Canister ID, SyncBalances, Withdraw ───────────────────────────────
+
+export function useCanisterId() {
+  const { actor, isFetching } = useActor();
+  return useQuery<string>({
+    queryKey: ["canisterId"],
+    queryFn: async () => {
+      if (!actor) return "";
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const p = await (actor as any).getCanisterId();
+        return p?.toText ? p.toText() : String(p);
+      } catch {
+        return "";
+      }
+    },
+    enabled: !!actor && !isFetching,
+    staleTime: Number.POSITIVE_INFINITY, // canister ID never changes
+  });
+}
+
+export function useSyncBalances() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async () => {
+      if (!actor) throw new Error("Actor not available");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).syncBalances() as Promise<string>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["availableICPBalance"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
+    },
+  });
+}
+
+export function useWithdraw() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async ({
+      tokenCanisterId,
+      amount,
+      destination,
+    }: {
+      tokenCanisterId: string;
+      amount: number;
+      destination?: string;
+    }) => {
+      if (!actor) throw new Error("Actor not available");
+      const { Principal } = await import("@dfinity/principal");
+      const destPrincipal = destination
+        ? [Principal.fromText(destination)]
+        : [];
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).withdraw(
+        Principal.fromText(tokenCanisterId),
+        amount,
+        destPrincipal,
+      ) as Promise<string>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["availableICPBalance"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
+    },
   });
 }

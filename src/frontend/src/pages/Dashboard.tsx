@@ -11,19 +11,31 @@ import {
   History,
   Layers,
   Package,
+  RefreshCw,
   TrendingDown,
   TrendingUp,
   Wallet,
 } from "lucide-react";
 import { motion } from "motion/react";
 import { useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import TokenUniverseStatusCard from "../components/TokenUniverseStatusCard";
 import { useBaskets } from "../hooks/useBaskets";
 import { RiskTier, usePairTrades } from "../hooks/usePairTrades";
 import {
+  type PortfolioSnapshot,
   useAvailableICPBalance,
   useHoldings,
   useICPPrice,
+  usePortfolioHistory,
   usePortfolioValue,
   useProfile,
   useRealizedPnL,
@@ -118,6 +130,186 @@ function timeAgo(timestampNs: bigint): string {
   return `${Math.floor(diff / 86_400_000)}d ago`;
 }
 
+function formatChartDate(ms: number, totalPoints: number): string {
+  const d = new Date(ms);
+  if (totalPoints <= 48) {
+    return d.toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+  }
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+interface ChartTooltipProps {
+  active?: boolean;
+  payload?: Array<{ value: number; dataKey: string }>;
+  label?: number;
+  firstValue: number;
+}
+
+function ChartTooltipContent({
+  active,
+  payload,
+  label,
+  firstValue,
+}: ChartTooltipProps) {
+  if (!active || !payload?.length || label == null) return null;
+  const value = payload[0]?.value ?? 0;
+  const change = value - firstValue;
+  const pct = firstValue > 0 ? (change / firstValue) * 100 : 0;
+  return (
+    <div className="bg-[#12121a] border border-[#1e1e2e] rounded-lg p-3 shadow-xl text-xs">
+      <p className="text-muted-foreground mb-1">
+        {new Date(label).toLocaleString("en-US", {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: false,
+        })}
+      </p>
+      <p className="font-mono font-bold text-[#00f5ff] text-sm">
+        {value.toLocaleString("en-US", {
+          style: "currency",
+          currency: "USD",
+          minimumFractionDigits: 2,
+        })}
+      </p>
+      <p
+        className={cn(
+          "font-mono font-semibold",
+          change >= 0 ? "text-[#00ff88]" : "text-[#ff3366]",
+        )}
+      >
+        {change >= 0 ? "+" : ""}
+        {change.toLocaleString("en-US", {
+          style: "currency",
+          currency: "USD",
+          minimumFractionDigits: 2,
+        })}{" "}
+        ({pct >= 0 ? "+" : ""}
+        {pct.toFixed(2)}%)
+      </p>
+    </div>
+  );
+}
+
+function PortfolioChart({ data }: { data: PortfolioSnapshot[] }) {
+  const firstValue = data[0]?.totalValueUsd ?? 0;
+  const lastValue = data[data.length - 1]?.totalValueUsd ?? 0;
+  const isPositive = lastValue >= firstValue;
+
+  const enriched = data.map((pt, i) => {
+    const runMax = data
+      .slice(0, i + 1)
+      .reduce((m, p) => Math.max(m, p.totalValueUsd), 0);
+    return {
+      timestamp: pt.timestamp,
+      value: pt.totalValueUsd,
+      drawdown: pt.totalValueUsd < runMax ? pt.totalValueUsd : null,
+      runningMax: runMax,
+    };
+  });
+
+  const minVal = Math.min(...data.map((d) => d.totalValueUsd)) * 0.995;
+  const maxVal = Math.max(...data.map((d) => d.totalValueUsd)) * 1.005;
+
+  return (
+    <div
+      style={{
+        filter: "drop-shadow(0 0 8px rgba(0,245,255,0.25))",
+      }}
+    >
+      <ResponsiveContainer width="100%" height={220}>
+        <AreaChart
+          data={enriched}
+          margin={{ top: 8, right: 8, left: 8, bottom: 0 }}
+        >
+          <defs>
+            <linearGradient id="areaGradientPos" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#00ff88" stopOpacity={0.18} />
+              <stop offset="95%" stopColor="#00ff88" stopOpacity={0.01} />
+            </linearGradient>
+            <linearGradient id="areaGradientNeg" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="#ff3366" stopOpacity={0.18} />
+              <stop offset="95%" stopColor="#ff3366" stopOpacity={0.01} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid
+            strokeDasharray="3 3"
+            stroke="#1e1e2e"
+            vertical={false}
+          />
+          <XAxis
+            dataKey="timestamp"
+            tickFormatter={(v) => formatChartDate(v, data.length)}
+            tick={{ fill: "#6b7280", fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+            minTickGap={60}
+          />
+          <YAxis
+            domain={[minVal, maxVal]}
+            tickFormatter={(v) =>
+              `$${v.toLocaleString("en-US", {
+                notation: "compact",
+                maximumFractionDigits: 1,
+              })}`
+            }
+            tick={{ fill: "#6b7280", fontSize: 10 }}
+            axisLine={false}
+            tickLine={false}
+            width={56}
+          />
+          <Tooltip
+            content={(props) => (
+              <ChartTooltipContent
+                active={props.active}
+                payload={
+                  props.payload as Array<{
+                    value: number;
+                    dataKey: string;
+                  }>
+                }
+                label={props.label as number}
+                firstValue={firstValue}
+              />
+            )}
+          />
+          {/* Main area — green when positive, red when negative */}
+          <Area
+            type="monotone"
+            dataKey="value"
+            stroke="#00f5ff"
+            strokeWidth={2}
+            fill={
+              isPositive ? "url(#areaGradientPos)" : "url(#areaGradientNeg)"
+            }
+            dot={false}
+            activeDot={{
+              r: 4,
+              fill: "#00f5ff",
+              stroke: "#12121a",
+              strokeWidth: 2,
+            }}
+          />
+          {/* Drawdown overlay — semi-transparent red where value dips below running max */}
+          <Area
+            type="monotone"
+            dataKey="drawdown"
+            stroke="none"
+            fill="rgba(255,51,102,0.15)"
+            dot={false}
+            connectNulls={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 function StatCard({
   label,
   value,
@@ -190,6 +382,13 @@ const quickActions = [
   },
 ];
 
+const HISTORY_TABS = [
+  { days: 7, label: "7D" },
+  { days: 30, label: "30D" },
+  { days: 90, label: "90D" },
+  { days: 0, label: "All" },
+] as const;
+
 export default function Dashboard() {
   const navigate = useNavigate();
   const { displayName, riskPreference, isLoading } = useProfile();
@@ -208,6 +407,13 @@ export default function Dashboard() {
   const { data: holdings } = useHoldings();
 
   const [valueMode, setValueMode] = useState<"usd" | "icp">("usd");
+  const [historyDays, setHistoryDays] = useState<number>(30);
+
+  const {
+    data: portfolioHistory,
+    isLoading: historyLoading,
+    refetch: refetchHistory,
+  } = usePortfolioHistory(historyDays);
 
   const name = displayName || "Trader";
   const riskConfig = RISK_CONFIG[riskPreference];
@@ -386,6 +592,78 @@ export default function Dashboard() {
                 </button>
               </div>
             </div>
+          </CardContent>
+        </Card>
+      </motion.div>
+
+      {/* Portfolio Value History Chart */}
+      <motion.div
+        initial={{ opacity: 0, y: 20 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.45, delay: 0.07 }}
+        className="mb-6"
+        data-ocid="dashboard.portfolio-history.card"
+      >
+        <Card className="bg-card border-[#00f5ff]/20 shadow-[0_0_16px_rgba(0,245,255,0.07)]">
+          <CardHeader className="pb-3">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <CardTitle className="text-base font-semibold text-muted-foreground uppercase tracking-wider">
+                Portfolio Value History
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                {/* Tab buttons */}
+                <div className="flex items-center gap-1 p-1 rounded-lg bg-muted/30 border border-border">
+                  {HISTORY_TABS.map(({ days, label }) => (
+                    <button
+                      key={days}
+                      type="button"
+                      onClick={() => setHistoryDays(days)}
+                      className={cn(
+                        "px-2.5 py-1 text-xs font-semibold rounded-md transition-all duration-150",
+                        historyDays === days
+                          ? "bg-[#00f5ff]/20 text-[#00f5ff] border border-[#00f5ff]/40"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                      data-ocid={`dashboard.portfolio-history.${label.toLowerCase()}.tab`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => refetchHistory()}
+                  className="p-1.5 rounded-md hover:bg-primary/10 text-muted-foreground hover:text-[#00f5ff] transition-colors"
+                  title="Refresh history"
+                  data-ocid="dashboard.portfolio-history.refresh"
+                >
+                  <RefreshCw size={14} />
+                </button>
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent data-ocid="dashboard.portfolio-history.chart">
+            {historyLoading ? (
+              <div
+                className="h-48 flex items-center justify-center"
+                data-ocid="dashboard.portfolio-history.loading_state"
+              >
+                <Skeleton className="h-full w-full rounded-lg" />
+              </div>
+            ) : !portfolioHistory?.length ? (
+              <div
+                className="h-48 flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border"
+                data-ocid="dashboard.portfolio-history.empty_state"
+              >
+                <TrendingUp size={32} className="text-muted-foreground/30" />
+                <p className="text-sm text-muted-foreground text-center max-w-xs">
+                  No history yet — do a swap or wait 5 min for the first
+                  snapshot
+                </p>
+              </div>
+            ) : (
+              <PortfolioChart data={portfolioHistory} />
+            )}
           </CardContent>
         </Card>
       </motion.div>

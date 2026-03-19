@@ -1,5 +1,6 @@
 import Float "mo:core/Float";
 import Nat "mo:core/Nat";
+import Nat64 "mo:core/Nat64";
 import Time "mo:core/Time";
 import Array "mo:core/Array";
 import Text "mo:core/Text";
@@ -44,6 +45,31 @@ actor self {
 
   type ICRC2Ledger = actor {
     icrc2_transfer_from : (ICRC2TransferFromArgs) -> async { #Ok : Nat; #Err : ICRC2TransferFromError };
+  };
+
+  type ICRC1TransferArgs = {
+    to : Account;
+    amount : Nat;
+    fee : ?Nat;
+    memo : ?Blob;
+    from_subaccount : ?Blob;
+    created_at_time : ?Nat64;
+  };
+
+  type ICRC1TransferError = {
+    #BadFee : { expected_fee : Nat };
+    #BadBurn : { min_burn_amount : Nat };
+    #InsufficientFunds : { balance : Nat };
+    #TooOld;
+    #CreatedInFuture : { ledger_time : Nat64 };
+    #Duplicate : { duplicate_of : Nat };
+    #TemporarilyUnavailable;
+    #GenericError : { error_code : Nat; message : Text };
+  };
+
+  type ICRC1Ledger = actor {
+    icrc1_balance_of : (Account) -> async Nat;
+    icrc1_transfer : (ICRC1TransferArgs) -> async { #Ok : Nat; #Err : ICRC1TransferError };
   };
 
   // KongSwap router: 2ipq2-uqaaa-aaaar-qailq-cai
@@ -154,6 +180,12 @@ actor self {
     realizedPnL : Float;
   };
 
+  // ─── Portfolio Snapshot Type ────────────────────────────────────────────────
+  public type PortfolioSnapshot = {
+    timestamp : Int;
+    totalValueUsd : Float;
+  };
+
   // ─── Authorization ─────────────────────────────────────────────────────────
   let accessControlState = AccessControl.initState();
   include MixinAuthorization(accessControlState);
@@ -200,6 +232,13 @@ actor self {
   var kongSwapCache : Text = "";
   var tokenCacheUpdatedAt : Int = 0;
 
+  // ─── Portfolio Snapshot State ───────────────────────────────────────────────
+  // Stores up to 1000 snapshots; older entries are pruned automatically.
+  var portfolioSnapshots : [PortfolioSnapshot] = [];
+  // Last known portfolio value in USD — updated whenever frontend calls getPortfolioValue().
+  // recordPortfolioSnapshot() uses this cached value so the timer can fire autonomously.
+  var lastPortfolioValueUsd : Float = 0.0;
+
   // ─── Private Helpers ────────────────────────────────────────────────────────
 
   // Get token decimals from registry, default to 8 if unknown
@@ -233,6 +272,34 @@ actor self {
       n := n / 10;
     };
     result / divisor;
+  };
+
+  // Internal: push a snapshot with the current lastPortfolioValueUsd, pruning to 1000 entries.
+  func recordSnapshotInternal() : () {
+    let snapshot : PortfolioSnapshot = {
+      timestamp = Time.now();
+      totalValueUsd = lastPortfolioValueUsd;
+    };
+    var updated = portfolioSnapshots.concat([snapshot]);
+    // Keep only the latest 1000 entries
+    if (updated.size() > 1000) {
+      let dropCount = updated.size() - 1000;
+      updated := Array.tabulate(1000, func(i : Nat) : PortfolioSnapshot { updated[i + dropCount] });
+    };
+    portfolioSnapshots := updated;
+  };
+
+  // ─── 5-Minute Snapshot Timer ────────────────────────────────────────────────
+  // Fires every 5 minutes and records a portfolio snapshot using the last cached value.
+  let fiveMinutesNs : Nat64 = 5 * 60 * 1_000_000_000;
+
+  system func timer(setGlobalTimer : Nat64 -> ()) : async () {
+    // Schedule next fire in 5 minutes from now
+    let nowNs : Int = Time.now();
+    let nowNat : Nat = if (nowNs > 0) { Int.abs(nowNs) } else { 0 };
+    let nextFire = Nat64.fromNat(nowNat) + fiveMinutesNs;
+    setGlobalTimer(nextFire);
+    recordSnapshotInternal();
   };
 
   // ─── User Profile Methods ────────────────────────────────────────────────────
@@ -384,6 +451,19 @@ actor self {
     if (ks.size() > 2) { kongSwapCache := ks };
 
     tokenCacheUpdatedAt := Time.now();
+  };
+
+
+  // ─── Hardcoded Token Baseline ──────────────────────────────────────────────────────────────────
+  // Returns the 5 major ICP tokens as JSON — always available, zero API dependency.
+  public query func getHardcodedTokens() : async Text {
+    "{\"tokens\":[" #
+    "{\"canisterId\":\"ryjl3-tyaaa-aaaaa-aaaba-cai\",\"symbol\":\"ICP\",\"name\":\"Internet Computer\",\"decimals\":8,\"priceUsd\":0}," #
+    "{\"canisterId\":\"mxzaz-hqaaa-aaaar-qaada-cai\",\"symbol\":\"ckBTC\",\"name\":\"Chain-Key Bitcoin\",\"decimals\":8,\"priceUsd\":0}," #
+    "{\"canisterId\":\"ss2fx-dyaaa-aaaar-qacoq-cai\",\"symbol\":\"ckETH\",\"name\":\"Chain-Key Ethereum\",\"decimals\":18,\"priceUsd\":0}," #
+    "{\"canisterId\":\"xevnm-gaaaa-aaaar-qafnq-cai\",\"symbol\":\"ckUSDC\",\"name\":\"Chain-Key USDC\",\"decimals\":6,\"priceUsd\":1}," #
+    "{\"canisterId\":\"cngnf-vqaaa-aaaar-qag4q-cai\",\"symbol\":\"ckUSDT\",\"name\":\"Chain-Key USDT\",\"decimals\":6,\"priceUsd\":1}" #
+    "]}"
   };
 
   // ─── Pair Trades ───────────────────────────────────────────────────────────────
@@ -669,7 +749,7 @@ actor self {
   // ─── Swap Execution — Real On-Chain ────────────────────────────────────────
 
   // Quote estimate (3% slippage placeholder; real output determined by DEX at execution)
-  public shared ({ caller }) func getSwapQuote(tokenIn : Text, amountIn : Float, tokenOut : Text) : async Float {
+  public shared ({ caller }) func getSwapQuote(_tokenIn : Text, amountIn : Float, _tokenOut : Text) : async Float {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       Runtime.trap("Unauthorized: Only users can get swap quotes");
     };
@@ -892,6 +972,10 @@ actor self {
       route; priceImpactPct; realizedPnL;
     }]);
     nextSwapReceiptId += 1;
+
+    // Auto-record a portfolio snapshot after every successful swap
+    recordSnapshotInternal();
+
     execId;
   };
 
@@ -921,16 +1005,21 @@ actor self {
     swapReceipts.foldLeft(0.0, func(acc, r) { acc + r.realizedPnL });
   };
 
+  // getPortfolioValue: computes total USD value from a frontend-supplied price map.
+  // Also caches the result in lastPortfolioValueUsd so the snapshot timer has a value to store.
   public shared ({ caller }) func getPortfolioValue(priceMap : [(Text, Float)]) : async Float {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       Runtime.trap("Unauthorized: Only users can view portfolio value");
     };
-    holdings.foldLeft(0.0, func(acc, h) {
+    let value = holdings.foldLeft(0.0, func(acc, h) {
       switch (priceMap.find(func((id, _)) { id == h.tokenCanisterId })) {
         case (null) { acc };
         case (?(_, price)) { acc + h.balance * price };
       };
     });
+    // Cache for autonomous timer snapshots
+    lastPortfolioValueUsd := value;
+    value;
   };
 
   public shared ({ caller }) func getUnrealizedPnL(priceMap : [(Text, Float)], icpPriceUsd : Float) : async Float {
@@ -948,6 +1037,37 @@ actor self {
         };
       } else { acc };
     });
+  };
+
+  // ─── Portfolio Snapshot Methods ─────────────────────────────────────────────
+
+  // Manually trigger a snapshot (uses the last known portfolio value from getPortfolioValue).
+  // The frontend should call getPortfolioValue() first to ensure the cache is fresh.
+  public shared ({ caller }) func recordPortfolioSnapshot() : async Text {
+    switch (ownerPrincipal) {
+      case (null) { return "Error: No owner set." };
+      case (?owner) {
+        if (caller != owner) { return "Unauthorized: this platform is single-user only." };
+      };
+    };
+    recordSnapshotInternal();
+    "Snapshot recorded. totalValueUsd = " # lastPortfolioValueUsd.toText() # ", total snapshots = " # portfolioSnapshots.size().toText();
+  };
+
+  // Returns snapshots from the last N days, sorted newest first.
+  // Pass 7 for 7-day chart, 30 for 30-day, 90 for 90-day, 0 for all history.
+  public query ({ caller }) func getPortfolioHistory(days : Nat) : async [PortfolioSnapshot] {
+    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
+      Runtime.trap("Unauthorized: Only users can view portfolio history");
+    };
+    let cutoff : Int = if (days == 0) { 0 }
+      else { Time.now() - days.toInt() * 24 * 60 * 60 * 1_000_000_000 };
+    let filtered = portfolioSnapshots.filter(func(s : PortfolioSnapshot) : Bool {
+      s.timestamp >= cutoff;
+    });
+    // Return newest first
+    let size = filtered.size();
+    Array.tabulate(size, func(i : Nat) : PortfolioSnapshot { filtered[size - 1 - i] });
   };
 
   public shared ({ caller }) func getBasketDrift(basketId : Nat, priceMap : [(Text, Float)]) : async [{ slotIndex : Nat; driftBps : Int; direction : Text }] {
@@ -1017,4 +1137,95 @@ actor self {
       };
     };
   };
+
+  // ─── Wallet: Get canister own Principal (deposit address) ──────────────────
+  public query func getCanisterId() : async Principal {
+    Principal.fromActor(self)
+  };
+
+  // ─── Wallet: Sync on-chain balances for all held tokens ────────────────────
+  public shared ({ caller }) func syncBalances() : async Text {
+    switch (ownerPrincipal) {
+      case (null) { return "Error: No owner set." };
+      case (?owner) {
+        if (caller != owner) { return "Unauthorized: this platform is single-user only." };
+      };
+    };
+    var updatedCount = 0;
+    var newHoldings : [Holding] = holdings;
+    for (holding in holdings.vals()) {
+      try {
+        let ledger : ICRC1Ledger = actor(holding.tokenCanisterId);
+        let balance = await ledger.icrc1_balance_of({
+          owner = Principal.fromActor(self);
+          subaccount = null;
+        });
+        let decimalsVal : Nat8 = switch (decimalsRegistry.get(Principal.fromText(holding.tokenCanisterId))) {
+          case (?d) { d };
+          case (null) { 8 };
+        };
+        let floatBalance = natToFloat(balance, decimalsVal);
+        newHoldings := newHoldings.map(func(h : Holding) : Holding {
+          if (h.tokenCanisterId == holding.tokenCanisterId) {
+            { h with balance = floatBalance }
+          } else { h };
+        });
+        updatedCount += 1;
+      } catch (_) {};
+    };
+    holdings := newHoldings;
+    "Synced " # updatedCount.toText() # " token balance(s).";
+  };
+
+  // ─── Wallet: Withdraw tokens from canister to destination ──────────────────
+  public shared ({ caller }) func withdraw(
+    tokenCanisterId : Principal,
+    amount : Float,
+    destination : ?Principal
+  ) : async Text {
+    switch (ownerPrincipal) {
+      case (null) { return "Error: No owner set." };
+      case (?owner) {
+        if (caller != owner) { return "Unauthorized: this platform is single-user only." };
+      };
+    };
+    let dest : Principal = switch (destination) {
+      case (?d) { d };
+      case (null) {
+        switch (ownerPrincipal) {
+          case (?owner) { owner };
+          case (null) { return "Error: No destination principal provided." };
+        };
+      };
+    };
+    let decimalsVal : Nat8 = switch (decimalsRegistry.get(tokenCanisterId)) {
+      case (?d) { d };
+      case (null) { 8 };
+    };
+    let amountNat : Nat = floatToNat(amount, decimalsVal);
+    let ledger : ICRC1Ledger = actor(tokenCanisterId.toText());
+    let result = await ledger.icrc1_transfer({
+      to = { owner = dest; subaccount = null };
+      amount = amountNat;
+      fee = null;
+      memo = null;
+      from_subaccount = null;
+      created_at_time = null;
+    });
+    switch (result) {
+      case (#Ok(blockIndex)) {
+        holdings := holdings.map(func(h : Holding) : Holding {
+          if (h.tokenCanisterId == tokenCanisterId.toText()) {
+            let newBal = if (h.balance >= amount) { h.balance - amount } else { 0.0 };
+            { h with balance = newBal }
+          } else { h };
+        });
+        "Withdraw successful. Block index: " # blockIndex.toText();
+      };
+      case (#Err(e)) {
+        "Error: withdraw failed. " # debug_show(e);
+      };
+    };
+  };
+
 };

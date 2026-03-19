@@ -114,6 +114,7 @@ export interface backendInterface {
     fetchKongSwapTokens(): Promise<string>;
     getTokenUniverseCaches(): Promise<{ dexScreener: string; icpSwap: string; kongSwap: string; updatedAt: bigint }>;
     updateTokenUniverse(): Promise<void>;
+    getHardcodedTokens(): Promise<string>;
     getAvailableICPBalance(): Promise<number>;
     getBasket(id: bigint): Promise<Basket | null>;
     getBasketDrift(basketId: bigint, priceMap: Array<[string, number]>): Promise<Array<{
