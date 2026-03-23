@@ -180,6 +180,21 @@ export interface _SERVICE {
     [Array<BasketSlot>],
     { 'valid' : boolean, 'error' : [] | [string] }
   >,
+  'analyzeAndDecide' : ActorMethod<[bigint, boolean, number, string], string>,
+  'depositBtc' : ActorMethod<[], string>,
+  'depositEth' : ActorMethod<[], string>,
+  'getBasketFocusAsset' : ActorMethod<[bigint], string>,
+  'getBtcDepositAddress' : ActorMethod<[], string>,
+  'getCanisterId' : ActorMethod<[], Principal>,
+  'getEthDepositAddress' : ActorMethod<[], string>,
+  'getHardcodedTokens' : ActorMethod<[], string>,
+  'getPortfolioHistory' : ActorMethod<[bigint], Array<{ 'timestamp' : bigint, 'valueUsd' : number }>>,
+  'getUniqueDepositAddress' : ActorMethod<[], string>,
+  'requireIIVerification' : ActorMethod<[], boolean>,
+  'syncBalances' : ActorMethod<[], string>,
+  'toggleAgent' : ActorMethod<[bigint, boolean, boolean], boolean>,
+  'updateScalpingMode' : ActorMethod<[bigint, boolean], boolean>,
+  'withdrawWithDenomination' : ActorMethod<[string, number, string, Principal], string>,
 }
 export declare const idlService: IDL.ServiceClass;
 export declare const idlInitArgs: IDL.Type[];

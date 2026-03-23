@@ -8,7 +8,7 @@ import {
 import {
   ArrowLeftRight,
   BarChart2,
-  CreditCard,
+  Copy,
   History,
   LayoutDashboard,
   LogOut,
@@ -18,6 +18,7 @@ import {
   Wallet,
   Zap,
 } from "lucide-react";
+import { useRef, useState } from "react";
 import { useInternetIdentity } from "../hooks/useInternetIdentity";
 
 const navItems = [
@@ -27,7 +28,6 @@ const navItems = [
     icon: LayoutDashboard,
     exact: true,
   },
-  { label: "Funding", path: "/funding" as const, icon: CreditCard },
   { label: "Pair Trades", path: "/pair-trades" as const, icon: ArrowLeftRight },
   { label: "Baskets", path: "/baskets" as const, icon: Package },
   { label: "Analysis", path: "/analysis" as const, icon: BarChart2 },
@@ -52,15 +52,44 @@ function Logo() {
   );
 }
 
-function PrincipalBadge({ principal }: { principal: string }) {
+function PrincipalButton({ principal }: { principal: string }) {
+  const [copied, setCopied] = useState(false);
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const short = `${principal.slice(0, 5)}...${principal.slice(-4)}`;
+
+  const doCopy = () => {
+    navigator.clipboard.writeText(principal).catch(() => {});
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handlePointerDown = () => {
+    longPressTimer.current = setTimeout(() => {
+      doCopy();
+    }, 800);
+  };
+
+  const handlePointerUp = () => {
+    if (longPressTimer.current) clearTimeout(longPressTimer.current);
+  };
+
   return (
-    <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-primary/10 border border-primary/30 shadow-neon-cyan-sm">
+    <button
+      type="button"
+      onClick={doCopy}
+      onPointerDown={handlePointerDown}
+      onPointerUp={handlePointerUp}
+      onPointerLeave={handlePointerUp}
+      title="Click to copy principal"
+      className="group flex items-center gap-1.5 px-2 py-1 rounded-md bg-primary/10 border border-primary/30 shadow-neon-cyan-sm text-primary text-xs font-mono-data font-medium hover:bg-primary/20 hover:border-primary/50 transition-all duration-150 cursor-pointer"
+    >
       <div className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
-      <span className="text-primary text-xs font-mono-data font-medium">
-        {short}
-      </span>
-    </div>
+      <span>{copied ? "Copied!" : short}</span>
+      <Copy
+        size={10}
+        className="opacity-0 group-hover:opacity-100 transition-opacity duration-150 ml-0.5"
+      />
+    </button>
   );
 }
 
@@ -124,7 +153,7 @@ function SidebarNav() {
       {/* Principal badge */}
       {identity && (
         <div className="px-4 py-3 border-b border-sidebar-border">
-          <PrincipalBadge principal={principal} />
+          <PrincipalButton principal={principal} />
         </div>
       )}
 
@@ -170,7 +199,7 @@ function MobileHeader() {
   return (
     <header className="lg:hidden fixed top-0 left-0 right-0 h-14 bg-sidebar border-b border-sidebar-border z-30 flex items-center justify-between px-4">
       <Logo />
-      {identity && <PrincipalBadge principal={principal} />}
+      {identity && <PrincipalButton principal={principal} />}
     </header>
   );
 }

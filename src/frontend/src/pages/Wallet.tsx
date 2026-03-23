@@ -134,6 +134,7 @@ import { toast } from "sonner";
 import type { FundingEntry } from "../backend";
 import { FundingEntryType } from "../backend";
 import SwapExecutionDialog from "../components/SwapExecutionDialog";
+import { useActor } from "../hooks/useActor";
 import { useInternetIdentity } from "../hooks/useInternetIdentity";
 import {
   buildPriceMap,
@@ -709,17 +710,27 @@ export default function WalletPage() {
   const withdrawWithDenomination = useWithdrawWithDenomination();
 
   // Deposit address hooks
-  const { data: icpAddress = "", isLoading: icpAddrLoading } =
-    useUniqueDepositAddress();
-  const { data: btcAddress = "", isLoading: btcAddrLoading } =
-    useBtcDepositAddress();
-  const { data: ethAddress = "", isLoading: ethAddrLoading } =
-    useEthDepositAddress();
+  const {
+    data: icpAddress = "",
+    isLoading: icpAddrLoading,
+    refetch: refetchIcp,
+  } = useUniqueDepositAddress();
+  const {
+    data: btcAddress = "",
+    isLoading: btcAddrLoading,
+    refetch: refetchBtc,
+  } = useBtcDepositAddress();
+  const {
+    data: ethAddress = "",
+    isLoading: ethAddrLoading,
+    refetch: refetchEth,
+  } = useEthDepositAddress();
   const depositBtc = useDepositBtc();
   const depositEth = useDepositEth();
 
   // II auth
   const { login, loginStatus, identity } = useInternetIdentity();
+  const { actor } = useActor();
 
   const priceMap = useMemo(() => new Map(buildPriceMap(tokens)), [tokens]);
   const portfolioValueICP =
@@ -762,6 +773,29 @@ export default function WalletPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loginStatus]);
+
+  // Debug: log deposit addresses as they load
+  useEffect(() => {
+    if (icpAddress) console.log("✅ ICP Address loaded:", icpAddress);
+  }, [icpAddress]);
+  useEffect(() => {
+    if (btcAddress) console.log("✅ BTC Address loaded:", btcAddress);
+  }, [btcAddress]);
+  useEffect(() => {
+    if (ethAddress) console.log("✅ ETH Address loaded:", ethAddress);
+  }, [ethAddress]);
+
+  // Force-fetch all deposit addresses on mount when actor + identity are ready
+  const depositMountedRef = useRef(false);
+  useEffect(() => {
+    if (actor && identity && !depositMountedRef.current) {
+      depositMountedRef.current = true;
+      console.log("🔄 Deposit tab mounted, forcing address fetch...");
+      refetchIcp();
+      refetchBtc();
+      refetchEth();
+    }
+  }, [actor, identity, refetchIcp, refetchBtc, refetchEth]);
 
   function executeWithdrawal() {
     if (!withdrawToken || !withdrawAmount || !withdrawDest) return;
@@ -1022,6 +1056,13 @@ export default function WalletPage() {
               <p className="text-sm mt-1" style={{ color: "#9ca3af" }}>
                 Receive ICP, Bitcoin, or Ethereum directly to your smart wallet
               </p>
+              <p
+                className="text-xs mt-2 font-semibold"
+                style={{ color: "#00f5ff", opacity: 0.8 }}
+              >
+                Addresses generated once per Internet Identity — persistent
+                forever
+              </p>
             </motion.div>
 
             {/* ICP / ICRC-1 Card */}
@@ -1098,6 +1139,35 @@ export default function WalletPage() {
                 </span>
               }
             />
+
+            {/* Refresh Addresses */}
+            <Button
+              className="w-full font-semibold text-base py-3"
+              style={{
+                background:
+                  "linear-gradient(135deg, rgba(123,47,255,0.2), rgba(0,245,255,0.1))",
+                color: "#00f5ff",
+                border: "1px solid rgba(0,245,255,0.3)",
+                boxShadow: "0 0 12px rgba(0,245,255,0.1)",
+              }}
+              onClick={() => {
+                refetchIcp();
+                refetchBtc();
+                refetchEth();
+                toast.info("Refreshing deposit addresses...");
+              }}
+              disabled={icpAddrLoading || btcAddrLoading || ethAddrLoading}
+              data-ocid="wallet.deposit.secondary_button"
+            >
+              {icpAddrLoading || btcAddrLoading || ethAddrLoading ? (
+                <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4 mr-2" />
+              )}
+              {icpAddrLoading || btcAddrLoading || ethAddrLoading
+                ? "Loading addresses..."
+                : "Refresh All Addresses"}
+            </Button>
 
             {/* Refresh Balances */}
             <Button

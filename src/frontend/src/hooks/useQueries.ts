@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { RiskTier } from "../backend";
 import type { TokenUniverse, UnifiedToken } from "../types/tokenUniverse";
 import { useActor } from "./useActor";
+import { useInternetIdentity } from "./useInternetIdentity";
 
 // Re-export types so other hooks can import from here
 export type { UnifiedToken, TokenUniverse };
@@ -1019,52 +1020,76 @@ export function useUniqueDepositAddress() {
   return useQuery<string>({
     queryKey: ["uniqueDepositAddress"],
     queryFn: async () => {
-      if (!actor) return "";
+      console.log("🔄 Fetching ICP address...");
       try {
+        if (!actor) throw new Error("Actor not ready");
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (await (actor as any).getUniqueDepositAddress()) as string;
-      } catch {
-        return "";
+        const result = await (actor as any).getUniqueDepositAddress();
+        console.log("✅ ICP Address loaded:", result);
+        return (result as string) || "";
+      } catch (err) {
+        console.error("❌ ICP address fetch failed:", err);
+        throw err;
       }
     },
     enabled: !!actor && !isFetching,
-    staleTime: Number.POSITIVE_INFINITY,
+    staleTime: 0,
+    retry: 3,
+    retryDelay: 2000,
   });
 }
 
 export function useBtcDepositAddress() {
   const { actor, isFetching } = useActor();
+  const { identity } = useInternetIdentity();
   return useQuery<string>({
     queryKey: ["btcDepositAddress"],
     queryFn: async () => {
-      if (!actor) return "";
+      console.log("🔄 Fetching BTC address...");
       try {
+        if (!actor) throw new Error("Actor not ready");
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (await (actor as any).getBtcDepositAddress()) as string;
-      } catch {
-        return "";
+        const result = await (actor as any).getBtcDepositAddress();
+        if (!result || result === "")
+          throw new Error("Empty BTC address returned");
+        console.log("✅ BTC Address loaded:", result);
+        return result as string;
+      } catch (err) {
+        console.error("❌ BTC address fetch failed:", err);
+        throw err;
       }
     },
-    enabled: !!actor && !isFetching,
-    staleTime: 60_000 * 60,
+    enabled: !!actor && !isFetching && !!identity,
+    staleTime: 60_000 * 5,
+    retry: 3,
+    retryDelay: 2000,
   });
 }
 
 export function useEthDepositAddress() {
   const { actor, isFetching } = useActor();
+  const { identity } = useInternetIdentity();
   return useQuery<string>({
     queryKey: ["ethDepositAddress"],
     queryFn: async () => {
-      if (!actor) return "";
+      console.log("🔄 Fetching ETH address...");
       try {
+        if (!actor) throw new Error("Actor not ready");
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (await (actor as any).getEthDepositAddress()) as string;
-      } catch {
-        return "";
+        const result = await (actor as any).getEthDepositAddress();
+        if (!result || result === "")
+          throw new Error("Empty ETH address returned");
+        console.log("✅ ETH Address loaded:", result);
+        return result as string;
+      } catch (err) {
+        console.error("❌ ETH address fetch failed:", err);
+        throw err;
       }
     },
-    enabled: !!actor && !isFetching,
-    staleTime: 60_000 * 60,
+    enabled: !!actor && !isFetching && !!identity,
+    staleTime: 60_000 * 5,
+    retry: 3,
+    retryDelay: 2000,
   });
 }
 
