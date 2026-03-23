@@ -245,6 +245,21 @@ export interface backendInterface {
     isCallerAdmin(): Promise<boolean>;
     isOwner(): Promise<boolean>;
     revokeTradingPermission(): Promise<string>;
+    getUniqueDepositAddress(): Promise<string>;
+    getBtcDepositAddress(): Promise<string>;
+    getEthDepositAddress(): Promise<string>;
+    depositBtc(): Promise<string>;
+    depositEth(): Promise<string>;
+    toggleAgent(id: bigint, isPairTrade: boolean, enabled: boolean): Promise<boolean>;
+    analyzeAndDecide(id: bigint, isPairTrade: boolean, focusAssetPrice: number, indicatorSummary: string): Promise<string>;
+    syncBalances(): Promise<string>;
+    withdrawWithDenomination(tokenSymbol: string, amount: number, denomination: string, destination: Principal): Promise<string>;
+    getPortfolioHistory(days: bigint): Promise<Array<{timestamp: bigint, valueUsd: number}>>;
+    getBasketFocusAsset(id: bigint): Promise<string>;
+    updateScalpingMode(id: bigint, enabled: boolean): Promise<boolean>;
+    getHardcodedTokens(): Promise<string>;
+    getCanisterId(): Promise<Principal>;
+    requireIIVerification(): Promise<boolean>;
     saveCallerUserProfile(profile: UserProfile): Promise<void>;
     setDecimals(token: Principal, decimals: number): Promise<void>;
     setProfile(name: string, currency: string, risk: string): Promise<{
@@ -996,6 +1011,66 @@ export class Backend implements backendInterface {
             const result = await this.actor.validateBasketSlots(arg0);
             return from_candid_record_n30(this._uploadFile, this._downloadFile, result);
         }
+    }
+    async getUniqueDepositAddress(): Promise<string> {
+        const result = await this.actor.getUniqueDepositAddress();
+        return result;
+    }
+    async getBtcDepositAddress(): Promise<string> {
+        const result = await this.actor.getBtcDepositAddress();
+        return result;
+    }
+    async getEthDepositAddress(): Promise<string> {
+        const result = await this.actor.getEthDepositAddress();
+        return result;
+    }
+    async depositBtc(): Promise<string> {
+        const result = await this.actor.depositBtc();
+        return result;
+    }
+    async depositEth(): Promise<string> {
+        const result = await this.actor.depositEth();
+        return result;
+    }
+    async toggleAgent(id: bigint, isPairTrade: boolean, enabled: boolean): Promise<boolean> {
+        const result = await this.actor.toggleAgent(id, isPairTrade, enabled);
+        return result;
+    }
+    async analyzeAndDecide(id: bigint, isPairTrade: boolean, focusAssetPrice: number, indicatorSummary: string): Promise<string> {
+        const result = await this.actor.analyzeAndDecide(id, isPairTrade, focusAssetPrice, indicatorSummary);
+        return result;
+    }
+    async syncBalances(): Promise<string> {
+        const result = await this.actor.syncBalances();
+        return result;
+    }
+    async withdrawWithDenomination(tokenSymbol: string, amount: number, denomination: string, destination: Principal): Promise<string> {
+        const result = await this.actor.withdrawWithDenomination(tokenSymbol, amount, denomination, destination);
+        return result;
+    }
+    async getPortfolioHistory(days: bigint): Promise<Array<{timestamp: bigint, valueUsd: number}>> {
+        const result = await this.actor.getPortfolioHistory(days);
+        return result as Array<{timestamp: bigint, valueUsd: number}>;
+    }
+    async getBasketFocusAsset(id: bigint): Promise<string> {
+        const result = await this.actor.getBasketFocusAsset(id);
+        return result;
+    }
+    async updateScalpingMode(id: bigint, enabled: boolean): Promise<boolean> {
+        const result = await this.actor.updateScalpingMode(id, enabled);
+        return result;
+    }
+    async getHardcodedTokens(): Promise<string> {
+        const result = await this.actor.getHardcodedTokens();
+        return result;
+    }
+    async getCanisterId(): Promise<Principal> {
+        const result = await this.actor.getCanisterId();
+        return result;
+    }
+    async requireIIVerification(): Promise<boolean> {
+        const result = await this.actor.requireIIVerification();
+        return result;
     }
 }
 function from_candid_FundingEntryType_n16(_uploadFile: (file: ExternalBlob) => Promise<Uint8Array>, _downloadFile: (file: Uint8Array) => Promise<ExternalBlob>, value: _FundingEntryType): FundingEntryType {
