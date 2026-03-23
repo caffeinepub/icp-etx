@@ -739,7 +739,7 @@ export default function WalletPage() {
 
   // Data hooks
   const { data: portfolioValueUsd = 0 } = usePortfolioValue();
-  const { data: holdings = [] } = useHoldings();
+  const { data: holdings = [], refetch: refetchHoldings } = useHoldings();
   const { data: swapReceipts = [] } = useSwapReceipts();
   const { data: fundingEntries = [] } = useFundingEntries();
   const { data: canisterId = "" } = useCanisterId();
@@ -826,6 +826,20 @@ export default function WalletPage() {
   useEffect(() => {
     if (ethAddress) console.log("✅ ETH Address loaded:", ethAddress);
   }, [ethAddress]);
+
+  // Auto-sync balances when Holdings tab becomes active
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally triggers on activeTab + actor ready
+  useEffect(() => {
+    if (activeTab !== "overview" || !actor) return;
+    console.log("🔄 Auto-syncing balances...");
+    syncBalances.mutate(undefined, {
+      onSuccess: () => {
+        console.log("✅ Balances synced");
+        refetchHoldings();
+      },
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, actor]);
 
   // Force-fetch all deposit addresses: 8 retries, 1.2s delay, per-address tracking
   const depositMountedRef = useRef(false);
@@ -1225,6 +1239,46 @@ export default function WalletPage() {
 
           {/* ── Overview Tab ──────────────────────────────────────────── */}
           <TabsContent value="overview" className="mt-4 space-y-4">
+            {/* Sync Balances button */}
+            <div className="flex items-center justify-between gap-3">
+              <Button
+                size="sm"
+                className="font-semibold"
+                style={{
+                  background: "rgba(0,245,255,0.10)",
+                  color: "#00f5ff",
+                  border: "1px solid rgba(0,245,255,0.25)",
+                }}
+                onClick={() => {
+                  console.log("🔄 Auto-syncing balances...");
+                  syncBalances.mutate(undefined, {
+                    onSuccess: () => {
+                      console.log("✅ Balances synced");
+                      refetchHoldings();
+                      toast.success("Balances synced from ledger");
+                    },
+                    onError: (e) => toast.error(String(e)),
+                  });
+                }}
+                disabled={syncBalances.isPending}
+                data-ocid="wallet.holdings.primary_button"
+              >
+                {syncBalances.isPending ? (
+                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                )}
+                {syncBalances.isPending ? "Syncing..." : "Sync Balances"}
+              </Button>
+              {syncBalances.isSuccess && (
+                <span
+                  className="text-xs flex items-center gap-1"
+                  style={{ color: "#00ff88" }}
+                >
+                  <CheckCircle2 className="w-3 h-3" /> Synced
+                </span>
+              )}
+            </div>
             {holdings.length === 0 ? (
               <div
                 className="rounded-xl border p-10 text-center"
