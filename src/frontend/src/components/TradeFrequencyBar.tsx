@@ -22,16 +22,21 @@ export default function TradeFrequencyBar({
   }
 
   // Fallback data if backend doesn't have the method yet
-  const used = data?.usedThisMonth ?? 0;
-  const limit =
+  const usedRaw = data?.usedThisMonth ?? 0;
+  const limitRaw =
     data?.limitThisMonth ??
     (riskPreference === "Aggressive"
       ? 300
       : riskPreference === "Conservative"
         ? 30
         : 100);
+  const resetsAtRaw = data?.resetsAt ?? 0;
+
+  const used = Number(usedRaw);
+  const limit = Number(limitRaw);
+  const resetsAt = Number(resetsAtRaw);
+
   const pctUsed = limit > 0 ? (used / limit) * 100 : 0;
-  const resetsAt = data?.resetsAt ?? 0;
 
   const daysUntilReset =
     resetsAt > 0

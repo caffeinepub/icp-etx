@@ -38,6 +38,7 @@ export default function TokenUniverseStatusCard() {
     dexscreenerStatus,
     fetchedAt,
     refetch,
+    coreFallbackActive,
   } = useTokenUniverse();
 
   const dexCount = tokens.filter((t) => t.priceUsd !== null).length;
@@ -134,6 +135,21 @@ export default function TokenUniverseStatusCard() {
             </span>
           )}
         </div>
+        {(coreFallbackActive || tokens.length <= 5) && (
+          <div
+            className="mt-2 px-2 py-1 rounded text-xs font-mono"
+            style={{
+              background: "#1e1e2e",
+              color: "#00f5ff",
+              border: "1px solid #00f5ff40",
+            }}
+            data-ocid="token-universe.core-fallback.panel"
+          >
+            Core fallback active —{" "}
+            {tokens.length <= 5 ? "5 core tokens" : `${tokens.length} tokens`}{" "}
+            loaded
+          </div>
+        )}
       </CardContent>
     </Card>
   );

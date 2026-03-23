@@ -2,6 +2,84 @@ import React, { useState, useRef, useEffect } from "react";
 import { useTokenSearch, useTokenUniverse } from "../hooks/useQueries";
 import type { UnifiedToken } from "../types/tokenUniverse";
 
+const CORE_FALLBACK: UnifiedToken[] = [
+  {
+    address: "ryjl3-tyaaa-aaaaa-aaaba-cai",
+    symbol: "ICP",
+    name: "Internet Computer",
+    decimals: 8,
+    priceUsd: null,
+    priceNative: 1,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["kongswap", "icpswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "mxzaz-hqaaa-aaaar-qaada-cai",
+    symbol: "ckBTC",
+    name: "Chain-Key Bitcoin",
+    decimals: 8,
+    priceUsd: null,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["kongswap", "icpswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "ss2fx-dyaaa-aaaar-qacoq-cai",
+    symbol: "ckETH",
+    name: "Chain-Key Ethereum",
+    decimals: 18,
+    priceUsd: null,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["kongswap", "icpswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "xevnm-gaaaa-aaaar-qafnq-cai",
+    symbol: "ckUSDC",
+    name: "Chain-Key USDC",
+    decimals: 6,
+    priceUsd: 1.0,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["kongswap", "icpswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "cngnf-vqaaa-aaaar-qag4q-cai",
+    symbol: "ckUSDT",
+    name: "Chain-Key USDT",
+    decimals: 6,
+    priceUsd: 1.0,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["kongswap", "icpswap"],
+    lastUpdated: 0,
+  },
+];
+
 interface TokenSelectorProps {
   onSelect: (token: UnifiedToken) => void;
   placeholder?: string;
@@ -30,7 +108,7 @@ export function TokenSelector({
   const containerRef = useRef<HTMLDivElement>(null);
 
   const universe = useTokenUniverse();
-  const { isLoading } = universe;
+
   const searchResults = useTokenSearch(query);
 
   // Close on outside click
@@ -47,7 +125,9 @@ export function TokenSelector({
     return () => document.removeEventListener("mousedown", handleClick);
   }, []);
 
-  const tokens = (query.trim() ? searchResults : universe.tokens)
+  const baseList = query.trim() ? searchResults : universe.tokens;
+  const displayList = baseList.length > 0 ? baseList : CORE_FALLBACK;
+  const tokens = displayList
     .filter((t) => t.address !== excludeAddress)
     .slice(0, 60);
 
@@ -170,17 +250,7 @@ export function TokenSelector({
 
           {/* Token list */}
           <div className="overflow-y-auto flex-1">
-            {isLoading && tokens.length === 0 ? (
-              <div className="flex flex-col gap-2 p-3">
-                {[1, 2, 3].map((i) => (
-                  <div
-                    key={i}
-                    className="h-10 rounded animate-pulse"
-                    style={{ background: "#1e1e2e" }}
-                  />
-                ))}
-              </div>
-            ) : tokens.length === 0 ? (
+            {tokens.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-8 gap-2">
                 <svg
                   role="img"

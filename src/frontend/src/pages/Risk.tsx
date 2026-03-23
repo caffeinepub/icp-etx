@@ -143,15 +143,20 @@ const INDICATOR_CATEGORIES = [
 function FrequencyStatCards() {
   const { data } = useTradeFrequencyStatus();
   const { riskPreference } = useProfile();
-  const used = data?.usedThisMonth ?? 0;
-  const limit =
+  const usedRaw = data?.usedThisMonth ?? 0;
+  const limitRaw =
     data?.limitThisMonth ??
     (riskPreference === "Aggressive"
       ? 300
       : riskPreference === "Conservative"
         ? 30
         : 100);
-  const resetsAt = data?.resetsAt ?? 0;
+  const resetsAtRaw = data?.resetsAt ?? 0;
+
+  const used = Number(usedRaw);
+  const limit = Number(limitRaw);
+  const resetsAt = Number(resetsAtRaw);
+
   const daysLeft =
     resetsAt > 0
       ? Math.max(0, Math.ceil((resetsAt / 1_000_000 - Date.now()) / 86_400_000))

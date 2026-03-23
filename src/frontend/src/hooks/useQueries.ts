@@ -1,168 +1,448 @@
-import { buildTokenUniverse } from "@/lib/buildTokenUniverse";
-import type { TokenUniverse, UnifiedToken } from "@/types/tokenUniverse";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
-import type {
-  FundingEntry,
-  FundingEntryType,
-  Holding,
-  SwapReceipt,
-} from "../backend";
+import { RiskTier } from "../backend";
+import type { TokenUniverse, UnifiedToken } from "../types/tokenUniverse";
 import { useActor } from "./useActor";
 
-export interface ProfileData {
-  displayName: string;
-  preferredCurrency: string;
-  riskPreference: string;
+// Re-export types so other hooks can import from here
+export type { UnifiedToken, TokenUniverse };
+export { RiskTier };
+
+// ─── Token Universe ───────────────────────────────────────────────────────────
+
+/**
+ * Returns true if the address looks like an ICP canister ID
+ * (5 base32 groups separated by hyphens, e.g. "ryjl3-tyaaa-aaaaa-aaaba-cai").
+ * Rejects ETH 0x… addresses, LTC addresses, hex strings, etc.
+ */
+function isIcpCanisterId(addr: string): boolean {
+  return /^[a-z2-7]+-[a-z2-7]+-[a-z2-7]+-[a-z2-7]+-[a-z2-7]+$/.test(addr);
 }
+
+const HARDCODED_TOKENS: UnifiedToken[] = [
+  {
+    address: "ryjl3-tyaaa-aaaaa-aaaba-cai",
+    symbol: "ICP",
+    name: "Internet Computer",
+    decimals: 8,
+    priceUsd: null,
+    priceNative: 1,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["icpswap", "kongswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "mxzaz-hqaaa-aaaar-qaada-cai",
+    symbol: "ckBTC",
+    name: "Chain-Key Bitcoin",
+    decimals: 8,
+    priceUsd: null,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["icpswap", "kongswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "ss2fx-dyaaa-aaaar-qacoq-cai",
+    symbol: "ckETH",
+    name: "Chain-Key Ethereum",
+    decimals: 18,
+    priceUsd: null,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["icpswap", "kongswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "xevnm-gaaaa-aaaar-qafnq-cai",
+    symbol: "ckUSDC",
+    name: "Chain-Key USDC",
+    decimals: 6,
+    priceUsd: 1.0,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["icpswap", "kongswap"],
+    lastUpdated: 0,
+  },
+  {
+    address: "cngnf-vqaaa-aaaar-qag4q-cai",
+    symbol: "ckUSDT",
+    name: "Chain-Key USDT",
+    decimals: 6,
+    priceUsd: 1.0,
+    priceNative: null,
+    liquidityUsd: null,
+    volume24h: null,
+    priceChange24h: null,
+    icpswapAvailable: true,
+    kongswapAvailable: true,
+    dexIds: ["icpswap", "kongswap"],
+    lastUpdated: 0,
+  },
+];
+
+function parseKongSwapTokens(raw: string): UnifiedToken[] {
+  try {
+    const data = JSON.parse(raw);
+    const list = Array.isArray(data) ? data : (data?.tokens ?? []);
+    return list
+      .filter(
+        (t: Record<string, unknown>) =>
+          t.canister_id || t.canisterId || t.address,
+      )
+      .map((t: Record<string, unknown>) => ({
+        address: String(t.canister_id ?? t.canisterId ?? t.address ?? ""),
+        symbol: String(t.symbol ?? ""),
+        name: String(t.name ?? t.symbol ?? ""),
+        decimals: Number(t.decimals ?? 8),
+        priceUsd: Number(t.price_usd ?? t.priceUsd ?? t.price ?? 0) || null,
+        priceNative: null,
+        liquidityUsd: t.tvl ? Number(t.tvl) : null,
+        volume24h: t.volume_24h ? Number(t.volume_24h) : null,
+        priceChange24h: null,
+        icpswapAvailable: false,
+        kongswapAvailable: true,
+        dexIds: ["kongswap"],
+        lastUpdated: Date.now(),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+function parseDexScreenerPairs(raw: string): UnifiedToken[] {
+  try {
+    const data = JSON.parse(raw);
+    const pairs = data?.pairs ?? [];
+    const seen = new Set<string>();
+    const result: UnifiedToken[] = [];
+    for (const pair of pairs) {
+      // Only keep pairs on the ICP chain
+      if (pair.chainId && pair.chainId !== "icp") continue;
+      const address =
+        pair.baseToken?.address ?? pair.quoteToken?.address ?? pair.pairAddress;
+      if (!address || seen.has(address)) continue;
+      seen.add(address);
+      result.push({
+        address,
+        symbol: String(pair.baseToken?.symbol ?? ""),
+        name: String(pair.baseToken?.name ?? pair.baseToken?.symbol ?? ""),
+        decimals: 8,
+        priceUsd: pair.priceUsd ? Number(pair.priceUsd) : null,
+        priceNative: null,
+        liquidityUsd: pair.liquidity?.usd ? Number(pair.liquidity.usd) : null,
+        volume24h: pair.volume?.h24 ? Number(pair.volume.h24) : null,
+        priceChange24h: pair.priceChange?.h24
+          ? Number(pair.priceChange.h24)
+          : null,
+        icpswapAvailable: false,
+        kongswapAvailable: false,
+        dexIds: ["dexscreener"],
+        lastUpdated: Date.now(),
+      });
+    }
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+function mergeTokens(
+  base: UnifiedToken[],
+  extras: UnifiedToken[],
+): UnifiedToken[] {
+  const map = new Map<string, UnifiedToken>();
+  for (const t of base) map.set(t.address, { ...t });
+  for (const t of extras) {
+    if (!t.address) continue;
+    const existing = map.get(t.address);
+    if (existing) {
+      if (t.priceUsd != null) existing.priceUsd = t.priceUsd;
+      if (t.liquidityUsd != null) existing.liquidityUsd = t.liquidityUsd;
+      if (t.volume24h != null) existing.volume24h = t.volume24h;
+      if (t.priceChange24h != null) existing.priceChange24h = t.priceChange24h;
+      existing.icpswapAvailable =
+        existing.icpswapAvailable || t.icpswapAvailable;
+      existing.kongswapAvailable =
+        existing.kongswapAvailable || t.kongswapAvailable;
+    } else {
+      map.set(t.address, { ...t });
+    }
+  }
+  return Array.from(map.values());
+}
+
+export function buildPriceMap(tokens: UnifiedToken[]): Array<[string, number]> {
+  return tokens
+    .filter((t) => t.priceUsd != null && t.priceUsd > 0)
+    .map((t) => [t.address, t.priceUsd as number]);
+}
+
+async function fetchKongSwapDirect(): Promise<UnifiedToken[]> {
+  try {
+    const resp = await fetch("https://api.kongswap.io/api/tokens", {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!resp.ok) return [];
+    return parseKongSwapTokens(await resp.text());
+  } catch {
+    return [];
+  }
+}
+
+async function fetchDexScreenerDirect(): Promise<UnifiedToken[]> {
+  try {
+    const resp = await fetch(
+      "https://api.dexscreener.com/latest/dex/search?q=icp",
+      { signal: AbortSignal.timeout(8000) },
+    );
+    if (!resp.ok) return [];
+    return parseDexScreenerPairs(await resp.text());
+  } catch {
+    return [];
+  }
+}
+
+interface TokenUniverseResult extends TokenUniverse {
+  isLoading: boolean;
+  refetch: () => void;
+  coreFallbackActive: boolean;
+}
+
+async function fetchCoinGeckoPrices(): Promise<Record<string, number>> {
+  try {
+    const resp = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=internet-computer,bitcoin,ethereum&vs_currencies=usd",
+      { signal: AbortSignal.timeout(8000) },
+    );
+    if (!resp.ok) return {};
+    const data = await resp.json();
+    return {
+      "ryjl3-tyaaa-aaaaa-aaaba-cai": data?.["internet-computer"]?.usd ?? 0,
+      "mxzaz-hqaaa-aaaar-qaada-cai": data?.bitcoin?.usd ?? 0,
+      "ss2fx-dyaaa-aaaar-qacoq-cai": data?.ethereum?.usd ?? 0,
+    };
+  } catch {
+    return {};
+  }
+}
+
+let _cachedResult: TokenUniverseResult | null = null;
+
+export function useTokenUniverse(): TokenUniverseResult {
+  const { actor } = useActor();
+
+  const queryResult = useQuery<TokenUniverse>({
+    queryKey: ["tokenUniverse"],
+    queryFn: async () => {
+      let fast: UnifiedToken[] = [];
+      let kongswapStatus: "ok" | "unavailable" = "unavailable";
+      let dexscreenerStatus: "ok" | "unavailable" = "unavailable";
+
+      if (actor) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const caches = await (actor as any).getTokenUniverseCaches();
+          if (caches) {
+            const kongRaw = caches.kongSwapCache ?? "";
+            const dexRaw = caches.dexScreenerCache ?? "";
+            if (kongRaw) fast = mergeTokens(fast, parseKongSwapTokens(kongRaw));
+            if (dexRaw) fast = mergeTokens(fast, parseDexScreenerPairs(dexRaw));
+          }
+          // Warm cache
+          void (actor as any).updateTokenUniverse?.().catch(() => {});
+        } catch {
+          /* ignore */
+        }
+      }
+
+      const [kong, dex] = await Promise.all([
+        fetchKongSwapDirect(),
+        fetchDexScreenerDirect(),
+      ]);
+
+      if (kong.length > 0) kongswapStatus = "ok";
+      if (dex.length > 0) dexscreenerStatus = "ok";
+
+      const live = mergeTokens(kong, dex);
+      const merged = mergeTokens(HARDCODED_TOKENS, mergeTokens(fast, live));
+      // ── CoinGecko fallback for ICP, ckBTC, ckETH ────────────────────────────
+      const COINGECKO_IDS = [
+        "ryjl3-tyaaa-aaaaa-aaaba-cai",
+        "mxzaz-hqaaa-aaaar-qaada-cai",
+        "ss2fx-dyaaa-aaaar-qacoq-cai",
+      ];
+      const needsFallback = COINGECKO_IDS.some((addr) => {
+        const t = merged.find((x) => x.address === addr);
+        return !t?.priceUsd || t.priceUsd === 0;
+      });
+      if (needsFallback) {
+        const cgPrices = await fetchCoinGeckoPrices();
+        for (const t of merged) {
+          const fallbackPrice = cgPrices[t.address];
+          if (
+            fallbackPrice &&
+            fallbackPrice > 0 &&
+            (!t.priceUsd || t.priceUsd === 0)
+          ) {
+            t.priceUsd = fallbackPrice;
+          }
+        }
+      }
+
+      // ── Dedup + ICP-only filter ─────────────────────────────────────────────
+      const CORE_IDS = new Set(HARDCODED_TOKENS.map((t) => t.address));
+      const seenAddresses = new Set<string>();
+      const cleaned = merged.filter((token) => {
+        const addr = token.address.toLowerCase();
+        if (seenAddresses.has(addr)) return false; // deduplicate
+        seenAddresses.add(addr);
+        if (CORE_IDS.has(addr)) return true; // always keep core 5
+        return isIcpCanisterId(addr); // drop non-ICP tokens
+      });
+      console.log(
+        `Token list cleaned: ${cleaned.length} tokens after dedup/filter`,
+      );
+
+      const icpToken = cleaned.find(
+        (t) => t.address === "ryjl3-tyaaa-aaaaa-aaaba-cai",
+      );
+      const icpPriceUsd = icpToken?.priceUsd ?? 0;
+
+      console.log(`[TokenUniverse] ${cleaned.length} tokens loaded`);
+      return {
+        tokens: cleaned,
+        icpPriceUsd,
+        fetchedAt: Date.now(),
+        icpswapStatus: "unavailable" as const,
+        kongswapStatus,
+        dexscreenerStatus,
+      };
+    },
+    enabled: true,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    initialData: {
+      tokens: HARDCODED_TOKENS,
+      icpPriceUsd: 0,
+      fetchedAt: 0,
+      icpswapStatus: "unavailable" as const,
+      kongswapStatus: "unavailable" as const,
+      dexscreenerStatus: "unavailable" as const,
+    },
+    initialDataUpdatedAt: 0,
+  });
+
+  const result: TokenUniverseResult = {
+    tokens: queryResult.data?.tokens ?? HARDCODED_TOKENS,
+    icpPriceUsd: queryResult.data?.icpPriceUsd ?? 0,
+    fetchedAt: queryResult.data?.fetchedAt ?? 0,
+    icpswapStatus: queryResult.data?.icpswapStatus ?? "unavailable",
+    kongswapStatus: queryResult.data?.kongswapStatus ?? "unavailable",
+    dexscreenerStatus: queryResult.data?.dexscreenerStatus ?? "unavailable",
+    isLoading: queryResult.isLoading,
+    refetch: queryResult.refetch,
+    coreFallbackActive: (queryResult.data?.fetchedAt ?? 0) === 0,
+  };
+  _cachedResult = result;
+  return result;
+}
+
+export function useICPPrice() {
+  const universe = useTokenUniverse();
+  return { icpPriceUsd: universe.icpPriceUsd, isLoading: universe.isLoading };
+}
+
+export function useToken(address: string | undefined) {
+  const universe = useTokenUniverse();
+  if (!address) return undefined;
+  return universe.tokens.find(
+    (t) => t.address.toLowerCase() === address.toLowerCase(),
+  );
+}
+
+export function useTokenSearch(query: string): UnifiedToken[] {
+  const universe = useTokenUniverse();
+  const q = query.trim().toLowerCase();
+  const allTokens =
+    universe.tokens.length > 0 ? universe.tokens : HARDCODED_TOKENS;
+  if (!q) return allTokens.slice(0, 50);
+  return allTokens.filter(
+    (t) =>
+      t.symbol.toLowerCase().includes(q) ||
+      t.name.toLowerCase().includes(q) ||
+      t.address.toLowerCase().includes(q),
+  );
+}
+
+// ─── Profile ──────────────────────────────────────────────────────────────────
 
 export function useProfile() {
   const { actor, isFetching } = useActor();
-
-  const query = useQuery<ProfileData | null>({
+  const query = useQuery({
     queryKey: ["profile"],
     queryFn: async () => {
       if (!actor) return null;
-      const result = await actor.getProfile();
-      if (result.__kind__ === "ok") {
-        return {
-          displayName: result.ok.displayName,
-          preferredCurrency: result.ok.preferredCurrency,
-          riskPreference: result.ok.riskPreference,
-        };
-      }
-      return null;
+      return actor.getProfile();
     },
     enabled: !!actor && !isFetching,
   });
-
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raw = query.data as any;
+  // Handle both { ok: {...} } and flat object shapes
+  const ok =
+    raw?.ok ?? (raw && typeof raw === "object" && !raw.err ? raw : null);
   return {
-    displayName: query.data?.displayName ?? "",
-    preferredCurrency: query.data?.preferredCurrency ?? "USD",
-    riskPreference: query.data?.riskPreference ?? "",
+    displayName: ok?.displayName ?? ok?.name ?? "",
+    riskPreference: ok?.riskPreference ?? ok?.risk ?? "Moderate",
+    preferredCurrency: ok?.preferredCurrency ?? ok?.currency ?? "USD",
+    ownerPrincipal: ok?.ownerPrincipal,
     isLoading: query.isLoading,
-    error: query.error,
+    data: query.data,
   };
 }
 
 export function useSetProfile() {
   const { actor } = useActor();
   const queryClient = useQueryClient();
-
   return useMutation({
-    mutationFn: async ({
-      name,
-      currency,
-      risk,
-    }: { name: string; currency: string; risk: string }) => {
+    mutationFn: async (profile: {
+      name: string;
+      currency: string;
+      risk: string;
+    }) => {
       if (!actor) throw new Error("Actor not available");
-      const result = await actor.setProfile(name, currency, risk);
-      if (result.__kind__ === "err") throw new Error(result.err);
-      return result.ok;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).setProfile(
+        profile.name,
+        profile.currency,
+        profile.risk,
+      );
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["profile"] });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["profile"] }),
   });
 }
 
-export function useTokenUniverse() {
-  const { actor } = useActor();
-
-  useEffect(() => {
-    if (!actor) return;
-    (actor as { updateTokenUniverse?: () => Promise<void> })
-      .updateTokenUniverse?.()
-      .catch(() => {});
-  }, [actor]);
-
-  const query = useQuery<TokenUniverse>({
-    queryKey: ["tokenUniverse"],
-    queryFn: () => buildTokenUniverse(actor),
-    staleTime: 30_000,
-    refetchInterval: 60_000,
-    refetchIntervalInBackground: false,
-  });
-  return {
-    tokens: query.data?.tokens ?? [],
-    icpPriceUsd: query.data?.icpPriceUsd ?? 0,
-    isLoading: query.isLoading,
-    error: query.error,
-    icpswapStatus: query.data?.icpswapStatus ?? ("unavailable" as const),
-    kongswapStatus: query.data?.kongswapStatus ?? ("unavailable" as const),
-    dexscreenerStatus:
-      query.data?.dexscreenerStatus ?? ("unavailable" as const),
-    fetchedAt: query.data?.fetchedAt ?? null,
-    refetch: query.refetch,
-  };
-}
-
-export function useToken(address: string): UnifiedToken | undefined {
-  const { tokens } = useTokenUniverse();
-  return tokens.find((t) => t.address.toLowerCase() === address.toLowerCase());
-}
-
-export function useTokenSearch(query: string): UnifiedToken[] {
-  const [debounced, setDebounced] = useState(query);
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(query), 300);
-    return () => clearTimeout(t);
-  }, [query]);
-  const { tokens } = useTokenUniverse();
-  if (!debounced.trim()) return tokens.slice(0, 20);
-  const lower = debounced.toLowerCase();
-  return tokens
-    .filter(
-      (t) =>
-        t.symbol.toLowerCase().includes(lower) ||
-        t.name.toLowerCase().includes(lower),
-    )
-    .sort((a, b) => (b.liquidityUsd ?? -1) - (a.liquidityUsd ?? -1))
-    .slice(0, 20);
-}
-
-export function useICPPrice() {
-  const { icpPriceUsd, isLoading, error } = useTokenUniverse();
-  return { icpPriceUsd, isLoading, error };
-}
-
-export interface TradeFrequencyStatus {
-  usedThisMonth: number;
-  limitThisMonth: number;
-  resetsAt: number;
-  pctUsed: number;
-}
-
-export function useTradeFrequencyStatus() {
-  const { actor, isFetching } = useActor();
-  return useQuery<TradeFrequencyStatus | null>({
-    queryKey: ["tradeFrequency"],
-    queryFn: async () => {
-      if (!actor) return null;
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const r = await (actor as any).getTradeFrequencyStatus();
-        if (!r) return null;
-        return {
-          usedThisMonth: Number(r.usedThisMonth),
-          limitThisMonth: Number(r.limitThisMonth),
-          resetsAt: Number(r.resetsAt),
-          pctUsed: Number(r.pctUsed),
-        };
-      } catch {
-        return null;
-      }
-    },
-    enabled: !!actor && !isFetching,
-    staleTime: 30_000,
-  });
-}
-
-// ── Funding Ledger Hooks ──────────────────────────────────────────────────────
+// ─── Funding ─────────────────────────────────────────────────────────────────
 
 export function useFundingEntries() {
   const { actor, isFetching } = useActor();
-  return useQuery<FundingEntry[]>({
+  return useQuery({
     queryKey: ["fundingEntries"],
     queryFn: async () => {
       if (!actor) return [];
@@ -174,7 +454,7 @@ export function useFundingEntries() {
 
 export function useTotalFundedICP() {
   const { actor, isFetching } = useActor();
-  return useQuery<number>({
+  return useQuery({
     queryKey: ["totalFundedICP"],
     queryFn: async () => {
       if (!actor) return 0;
@@ -187,19 +467,19 @@ export function useTotalFundedICP() {
 export function useAddFundingEntry() {
   const { actor } = useActor();
   const queryClient = useQueryClient();
-
   return useMutation({
-    mutationFn: async ({
-      entryType,
-      amountICP,
-      note,
-    }: {
-      entryType: FundingEntryType;
+    mutationFn: async (entry: {
+      entryType: unknown;
       amountICP: number;
       note: string;
     }) => {
       if (!actor) throw new Error("Actor not available");
-      return actor.addFundingEntry(entryType, amountICP, note);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).addFundingEntry(
+        entry.entryType,
+        entry.amountICP,
+        entry.note,
+      );
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["fundingEntries"] });
@@ -209,11 +489,11 @@ export function useAddFundingEntry() {
   });
 }
 
-// ── Holdings Hooks ────────────────────────────────────────────────────────────
+// ─── Holdings ─────────────────────────────────────────────────────────────────
 
 export function useHoldings() {
   const { actor, isFetching } = useActor();
-  return useQuery<Holding[]>({
+  return useQuery({
     queryKey: ["holdings"],
     queryFn: async () => {
       if (!actor) return [];
@@ -223,14 +503,14 @@ export function useHoldings() {
   });
 }
 
-export function useHolding(tokenCanisterId: string) {
+export function useHolding(tokenCanisterId: string | undefined) {
   const { actor, isFetching } = useActor();
-  return useQuery<Holding | null>({
+  return useQuery({
     queryKey: ["holding", tokenCanisterId],
     queryFn: async () => {
       if (!actor || !tokenCanisterId) return null;
-      const result = await actor.getHolding(tokenCanisterId);
-      return result;
+      // actor.getHolding expects a string canister ID
+      return actor.getHolding(tokenCanisterId);
     },
     enabled: !!actor && !isFetching && !!tokenCanisterId,
   });
@@ -238,7 +518,7 @@ export function useHolding(tokenCanisterId: string) {
 
 export function useAvailableICPBalance() {
   const { actor, isFetching } = useActor();
-  return useQuery<number>({
+  return useQuery({
     queryKey: ["availableICPBalance"],
     queryFn: async () => {
       if (!actor) return 0;
@@ -251,56 +531,54 @@ export function useAvailableICPBalance() {
 export function useUpdateHolding() {
   const { actor } = useActor();
   const queryClient = useQueryClient();
-
   return useMutation({
-    mutationFn: async ({
-      tokenCanisterId,
-      amountChange,
-    }: {
+    mutationFn: async (params: {
       tokenCanisterId: string;
       amountChange: number;
     }) => {
       if (!actor) throw new Error("Actor not available");
-      return actor.updateHolding(tokenCanisterId, amountChange);
+      // actor.updateHolding expects string canister ID
+      return actor.updateHolding(params.tokenCanisterId, params.amountChange);
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["holdings"] });
-      queryClient.invalidateQueries({ queryKey: ["holding"] });
-      queryClient.invalidateQueries({ queryKey: ["availableICPBalance"] });
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["holdings"] }),
   });
 }
 
-// ── Swap Execution Hooks ──────────────────────────────────────────────────────
+// ─── Swap ─────────────────────────────────────────────────────────────────────
 
 export function useSwapReceipts() {
   const { actor, isFetching } = useActor();
-  return useQuery<SwapReceipt[]>({
+  return useQuery({
     queryKey: ["swapReceipts"],
     queryFn: async () => {
       if (!actor) return [];
       return actor.getSwapReceipts();
     },
     enabled: !!actor && !isFetching,
+    staleTime: 30_000,
   });
 }
 
 export function useSwapQuote(
-  tokenIn: string,
+  tokenIn: string | undefined,
   amountIn: number,
-  tokenOut: string,
+  tokenOut: string | undefined,
 ) {
   const { actor, isFetching } = useActor();
-  const enabled =
-    !!actor && !isFetching && !!tokenIn && !!tokenOut && amountIn > 0;
-
-  return useQuery<number>({
+  return useQuery({
     queryKey: ["swapQuote", tokenIn, amountIn, tokenOut],
     queryFn: async () => {
-      if (!actor) return 0;
+      if (!actor || !tokenIn || !tokenOut || amountIn <= 0) return 0;
+      // actor.getSwapQuote expects string canister IDs
       return actor.getSwapQuote(tokenIn, amountIn, tokenOut);
     },
-    enabled,
+    enabled:
+      !!actor &&
+      !isFetching &&
+      !!tokenIn &&
+      !!tokenOut &&
+      amountIn > 0 &&
+      tokenIn !== tokenOut,
     staleTime: 15_000,
   });
 }
@@ -308,15 +586,8 @@ export function useSwapQuote(
 export function useExecuteSwap() {
   const { actor } = useActor();
   const queryClient = useQueryClient();
-
   return useMutation({
-    mutationFn: async ({
-      tokenIn,
-      amountIn,
-      tokenOut,
-      route,
-      priceImpactPct,
-    }: {
+    mutationFn: async (params: {
       tokenIn: string;
       amountIn: number;
       tokenOut: string;
@@ -324,18 +595,19 @@ export function useExecuteSwap() {
       priceImpactPct: number;
     }) => {
       if (!actor) throw new Error("Actor not available");
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (actor as any).executeSwap(
-        tokenIn,
-        amountIn,
-        tokenOut,
-        route,
-        priceImpactPct,
+      const { Principal } = await import("@dfinity/principal");
+      // actor.executeSwap expects Principal for tokenIn/tokenOut
+      return actor.executeSwap(
+        Principal.fromText(params.tokenIn),
+        params.amountIn,
+        Principal.fromText(params.tokenOut),
+        params.route,
+        params.priceImpactPct,
       );
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["swapReceipts"] });
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["swapReceipts"] });
       queryClient.invalidateQueries({ queryKey: ["availableICPBalance"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
       queryClient.invalidateQueries({ queryKey: ["realizedPnL"] });
@@ -345,42 +617,252 @@ export function useExecuteSwap() {
   });
 }
 
-// ── PnL & Portfolio Hooks ─────────────────────────────────────────────────────
+// ─── Trading Permission ───────────────────────────────────────────────────────
 
-/** Build a priceMap array from the token universe for backend PnL/portfolio calls */
-export function buildPriceMap(
-  tokens: Array<{ address: string; priceUsd: number | null }>,
-): Array<[string, number]> {
-  return tokens
-    .filter((t) => t.priceUsd != null)
-    .map((t) => [t.address, t.priceUsd as number] as [string, number]);
+export function useTradingPermissionExpiry() {
+  const { actor, isFetching } = useActor();
+  return useQuery({
+    queryKey: ["tradingPermissionExpiry"],
+    queryFn: async () => {
+      if (!actor) return null;
+      return actor.getTradingPermissionExpiry();
+    },
+    enabled: !!actor && !isFetching,
+    refetchInterval: 30_000,
+  });
 }
+
+export function useGrantTradingPermission() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.grantTradingPermission();
+    },
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["tradingPermissionExpiry"] }),
+  });
+}
+
+export function useRevokeTradingPermission() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.revokeTradingPermission();
+    },
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["tradingPermissionExpiry"] }),
+  });
+}
+
+// ─── Trade Frequency ──────────────────────────────────────────────────────────
+
+export function useTradeFrequencyStatus() {
+  const { actor, isFetching } = useActor();
+  return useQuery({
+    queryKey: ["tradeFrequencyStatus"],
+    queryFn: async () => {
+      if (!actor) return null;
+      return actor.getTradeFrequencyStatus();
+    },
+    enabled: !!actor && !isFetching,
+  });
+}
+
+// ─── Pair Trades ──────────────────────────────────────────────────────────────
+
+export function usePairTrades() {
+  const { actor, isFetching } = useActor();
+  return useQuery({
+    queryKey: ["pairTrades"],
+    queryFn: async () => {
+      if (!actor) return [];
+      return actor.getPairTrades();
+    },
+    enabled: !!actor && !isFetching,
+  });
+}
+
+export function usePairTrade(id: bigint | undefined) {
+  const { actor, isFetching } = useActor();
+  return useQuery({
+    queryKey: ["pairTrade", id?.toString()],
+    queryFn: async () => {
+      if (!actor || id === undefined) return null;
+      const result = await actor.getPairTrade(id);
+      return Array.isArray(result) ? (result[0] ?? null) : result;
+    },
+    enabled: !!actor && !isFetching && id !== undefined,
+  });
+}
+
+export function useCreatePairTrade() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mutationFn: async (params: Record<string, any>) => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.createPairTrade(
+        params.tokenAAddress,
+        params.tokenASymbol,
+        params.tokenBAddress,
+        params.tokenBSymbol,
+        params.allocationUsd,
+        params.riskTier as RiskTier,
+        params.routeViaICP ?? false,
+        params.notes ?? "",
+      );
+    },
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["pairTrades"] }),
+  });
+}
+
+export function useUpdatePairTrade() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (params: {
+      id: bigint;
+      allocationUsd: number;
+      riskTier: RiskTier;
+      notes: string;
+    }) => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.updatePairTrade(
+        params.id,
+        params.allocationUsd,
+        params.riskTier,
+        params.notes,
+      );
+    },
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["pairTrades"] }),
+  });
+}
+
+export function useDeletePairTrade() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: bigint) => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.deletePairTrade(id);
+    },
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["pairTrades"] }),
+  });
+}
+
+// ─── Baskets ──────────────────────────────────────────────────────────────────
+
+export function useBaskets() {
+  const { actor, isFetching } = useActor();
+  return useQuery({
+    queryKey: ["baskets"],
+    queryFn: async () => {
+      if (!actor) return [];
+      return actor.getBaskets();
+    },
+    enabled: !!actor && !isFetching,
+  });
+}
+
+export function useBasket(id: bigint | undefined) {
+  const { actor, isFetching } = useActor();
+  return useQuery({
+    queryKey: ["basket", id?.toString()],
+    queryFn: async () => {
+      if (!actor || id === undefined) return null;
+      const result = await actor.getBasket(id);
+      return Array.isArray(result) ? (result[0] ?? null) : result;
+    },
+    enabled: !!actor && !isFetching && id !== undefined,
+  });
+}
+
+export function useCreateBasket() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mutationFn: async (params: Record<string, any>) => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.createBasket(
+        params.name,
+        params.description ?? "",
+        params.slots,
+        params.rebalanceThresholdBps ?? BigInt(500),
+      );
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["baskets"] }),
+  });
+}
+
+export function useUpdateBasket() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    mutationFn: async (params: Record<string, any>) => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.updateBasket(
+        params.id,
+        params.name,
+        params.description ?? "",
+        params.slots,
+        params.rebalanceThresholdBps ?? BigInt(500),
+      );
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["baskets"] }),
+  });
+}
+
+export function useDeleteBasket() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (id: bigint) => {
+      if (!actor) throw new Error("Actor not available");
+      return actor.deleteBasket(id);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["baskets"] }),
+  });
+}
+
+// ─── Portfolio Value & PnL ────────────────────────────────────────────────────
 
 export function usePortfolioValue() {
   const { actor, isFetching } = useActor();
-  const { tokens, isLoading: universeLoading } = useTokenUniverse();
+  const universe = useTokenUniverse();
 
   return useQuery<number>({
     queryKey: ["portfolioValue"],
     queryFn: async () => {
       if (!actor) return 0;
-      const priceMap = buildPriceMap(tokens);
-      return actor.getPortfolioValue(priceMap);
+      const priceMap = buildPriceMap(universe.tokens);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const val = await (actor as any).getPortfolioValue(priceMap);
+      return typeof val === "number" ? val : 0;
     },
-    enabled: !!actor && !isFetching && !universeLoading,
+    enabled: !!actor && !isFetching,
     staleTime: 30_000,
-    refetchInterval: 30_000,
   });
 }
 
 export function useRealizedPnL() {
   const { actor, isFetching } = useActor();
-
   return useQuery<number>({
     queryKey: ["realizedPnL"],
     queryFn: async () => {
       if (!actor) return 0;
-      return actor.getTotalRealizedPnL();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const val = await (actor as any).getTotalRealizedPnL();
+      return typeof val === "number" ? val : 0;
     },
     enabled: !!actor && !isFetching,
     staleTime: 30_000,
@@ -389,28 +871,30 @@ export function useRealizedPnL() {
 
 export function useUnrealizedPnL() {
   const { actor, isFetching } = useActor();
-  const {
-    tokens,
-    icpPriceUsd,
-    isLoading: universeLoading,
-  } = useTokenUniverse();
+  const universe = useTokenUniverse();
 
   return useQuery<number>({
     queryKey: ["unrealizedPnL"],
     queryFn: async () => {
       if (!actor) return 0;
-      const priceMap = buildPriceMap(tokens);
-      return actor.getUnrealizedPnL(priceMap, icpPriceUsd);
+      const priceMap = buildPriceMap(universe.tokens);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const val = await (actor as any).getUnrealizedPnL(
+        priceMap,
+        universe.icpPriceUsd,
+      );
+      return typeof val === "number" ? val : 0;
     },
-    enabled: !!actor && !isFetching && !universeLoading,
+    enabled: !!actor && !isFetching,
     staleTime: 30_000,
-    refetchInterval: 30_000,
   });
 }
 
+// ─── Basket Drift ─────────────────────────────────────────────────────────────
+
 export function useBasketDrift(basketId: bigint | undefined) {
   const { actor, isFetching } = useActor();
-  const { tokens, isLoading: universeLoading } = useTokenUniverse();
+  const universe = useTokenUniverse();
 
   return useQuery<
     Array<{ direction: string; slotIndex: bigint; driftBps: bigint }>
@@ -418,11 +902,11 @@ export function useBasketDrift(basketId: bigint | undefined) {
     queryKey: ["basketDrift", basketId?.toString()],
     queryFn: async () => {
       if (!actor || basketId === undefined) return [];
-      const priceMap = buildPriceMap(tokens);
+      const priceMap = buildPriceMap(universe.tokens);
       return actor.getBasketDrift(basketId, priceMap);
     },
     enabled:
-      !!actor && !isFetching && basketId !== undefined && !universeLoading,
+      !!actor && !isFetching && basketId !== undefined && !universe.isLoading,
     staleTime: 30_000,
   });
 }
@@ -472,7 +956,7 @@ export function useCanisterId() {
       }
     },
     enabled: !!actor && !isFetching,
-    staleTime: Number.POSITIVE_INFINITY, // canister ID never changes
+    staleTime: Number.POSITIVE_INFINITY,
   });
 }
 
@@ -524,6 +1008,175 @@ export function useWithdraw() {
       queryClient.invalidateQueries({ queryKey: ["holdings"] });
       queryClient.invalidateQueries({ queryKey: ["availableICPBalance"] });
       queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
+    },
+  });
+}
+
+// ── Smart Wallet: Deposit Addresses ──────────────────────────────────────────
+
+export function useUniqueDepositAddress() {
+  const { actor, isFetching } = useActor();
+  return useQuery<string>({
+    queryKey: ["uniqueDepositAddress"],
+    queryFn: async () => {
+      if (!actor) return "";
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (await (actor as any).getUniqueDepositAddress()) as string;
+      } catch {
+        return "";
+      }
+    },
+    enabled: !!actor && !isFetching,
+    staleTime: Number.POSITIVE_INFINITY,
+  });
+}
+
+export function useBtcDepositAddress() {
+  const { actor, isFetching } = useActor();
+  return useQuery<string>({
+    queryKey: ["btcDepositAddress"],
+    queryFn: async () => {
+      if (!actor) return "";
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (await (actor as any).getBtcDepositAddress()) as string;
+      } catch {
+        return "";
+      }
+    },
+    enabled: !!actor && !isFetching,
+    staleTime: 60_000 * 60,
+  });
+}
+
+export function useEthDepositAddress() {
+  const { actor, isFetching } = useActor();
+  return useQuery<string>({
+    queryKey: ["ethDepositAddress"],
+    queryFn: async () => {
+      if (!actor) return "";
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return (await (actor as any).getEthDepositAddress()) as string;
+      } catch {
+        return "";
+      }
+    },
+    enabled: !!actor && !isFetching,
+    staleTime: 60_000 * 60,
+  });
+}
+
+export function useDepositBtc() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!actor) throw new Error("Actor not available");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).depositBtc() as Promise<string>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
+    },
+  });
+}
+
+export function useDepositEth() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async () => {
+      if (!actor) throw new Error("Actor not available");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).depositEth() as Promise<string>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
+    },
+  });
+}
+
+export function useWithdrawWithDenomination() {
+  const { actor } = useActor();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      sourceToken,
+      amount,
+      outputToken,
+      destination,
+    }: {
+      sourceToken: string;
+      amount: number;
+      outputToken: "ICP" | "ckBTC" | "ckETH" | "Individual";
+      destination: string;
+    }) => {
+      if (!actor) throw new Error("Actor not available");
+      const { Principal } = await import("@dfinity/principal");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).withdrawWithDenomination(
+        Principal.fromText(sourceToken),
+        amount,
+        outputToken,
+        Principal.fromText(destination),
+      ) as Promise<string>;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["holdings"] });
+      queryClient.invalidateQueries({ queryKey: ["portfolioValue"] });
+    },
+  });
+}
+
+export function useToggleAgent() {
+  const { actor } = useActor();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      isPairTrade,
+      enabled,
+    }: {
+      id: bigint;
+      isPairTrade: boolean;
+      enabled: boolean;
+    }) => {
+      if (!actor) throw new Error("Actor not available");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).toggleAgent(
+        id,
+        isPairTrade,
+        enabled,
+      ) as Promise<boolean>;
+    },
+  });
+}
+
+export function useAnalyzeAndDecide() {
+  const { actor } = useActor();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      isPairTrade,
+      focusAssetPrice,
+      indicatorSummary,
+    }: {
+      id: bigint;
+      isPairTrade: boolean;
+      focusAssetPrice: number;
+      indicatorSummary: string;
+    }) => {
+      if (!actor) throw new Error("Actor not available");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).analyzeAndDecide(
+        id,
+        isPairTrade,
+        focusAssetPrice,
+        indicatorSummary,
+      ) as Promise<string>;
     },
   });
 }

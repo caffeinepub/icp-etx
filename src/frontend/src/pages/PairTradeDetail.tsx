@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { computeEMACrossover, computeMACD, computeRSI } from "@/lib/indicators";
 import { cn } from "@/lib/utils";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import {
@@ -25,7 +26,7 @@ import {
   Zap,
 } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import TokenPriceDisplay from "../components/TokenPriceDisplay";
 import {
   RiskTier,
@@ -33,7 +34,31 @@ import {
   usePairTrade,
   useUpdatePairTrade,
 } from "../hooks/usePairTrades";
-import { useICPPrice } from "../hooks/useQueries";
+import {
+  useAnalyzeAndDecide,
+  useICPPrice,
+  useToggleAgent,
+  useTokenUniverse,
+} from "../hooks/useQueries";
+
+function buildSyntheticPricesForIndicators(
+  priceUsd: number,
+  priceChange24h: number | null,
+  points = 30,
+): number[] {
+  const change24h = priceChange24h ?? 0;
+  const volatility = Math.abs(change24h) * 0.03;
+  const prices: number[] = [];
+  for (let i = 0; i < points; i++) {
+    const progress = i / (points - 1);
+    const trend = priceUsd * (1 - (change24h / 100) * (1 - progress));
+    const noise =
+      (Math.sin(i * 1.3) + Math.cos(i * 0.7)) * priceUsd * volatility * 0.5;
+    prices.push(Math.max(trend + noise, 0.000001));
+  }
+  prices[prices.length - 1] = priceUsd;
+  return prices;
+}
 
 const RISK_BADGE: Record<RiskTier, { label: string; className: string }> = {
   [RiskTier.conservative]: {
@@ -119,6 +144,59 @@ export default function PairTradeDetail() {
   );
   const [editNotes, setEditNotes] = useState("");
   const [swapOpen, setSwapOpen] = useState(false);
+  const [agentActive, setAgentActive] = useState(false);
+  const toggleAgentMutation = useToggleAgent();
+  const analyzeAndDecideMutation = useAnalyzeAndDecide();
+  const { tokens } = useTokenUniverse();
+  const agentIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  useEffect(() => {
+    if (agentActive) {
+      agentIntervalRef.current = setInterval(() => {
+        // Build indicator summary from the trade's tokenA price data
+        const tokenAddr: string =
+          (trade as any)?.tokenAAddress ?? (trade as any)?.tokenIn ?? "";
+        const token = tokens.find((t) => t.address === tokenAddr);
+        let indicatorSummary = "RSI=N/A, MACD=N/A, EMA=N/A";
+        if (token?.priceUsd) {
+          const prices = buildSyntheticPricesForIndicators(
+            token.priceUsd,
+            token.priceChange24h ?? null,
+          );
+          const rsi = computeRSI(prices);
+          const macd = computeMACD(prices);
+          const ema = computeEMACrossover(prices, 10, 20);
+          indicatorSummary = [
+            `RSI=${rsi != null ? rsi.toFixed(1) : "N/A"}`,
+            `MACD=${macd ? (macd.histogram > 0 ? "bullish" : "bearish") : "N/A"}`,
+            `EMA=${ema?.crossover ?? "N/A"}`,
+          ].join(", ");
+        }
+        console.log(
+          "[Agent] PairTrade ID",
+          id,
+          "| indicatorSummary:",
+          indicatorSummary,
+        );
+        analyzeAndDecideMutation.mutate({
+          id: BigInt(id),
+          isPairTrade: true,
+          focusAssetPrice: 0,
+          indicatorSummary,
+        });
+      }, 60_000);
+    } else {
+      if (agentIntervalRef.current) {
+        clearInterval(agentIntervalRef.current);
+        agentIntervalRef.current = null;
+      }
+    }
+    return () => {
+      if (agentIntervalRef.current) clearInterval(agentIntervalRef.current);
+    };
+    // biome-ignore lint/correctness/useExhaustiveDependencies: mutate is stable
+  }, [agentActive, id, trade, tokens, analyzeAndDecideMutation.mutate]);
+
   const [editError, setEditError] = useState("");
 
   function startEdit() {
@@ -271,6 +349,46 @@ export default function PairTradeDetail() {
               </div>
             </CardContent>
           </Card>
+        </motion.div>
+        {/* AI Agent Toggle */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.12 }}
+          data-ocid="pair-trade-detail.agent.panel"
+        >
+          <div
+            style={{ background: "#12121a", border: "1px solid #1e1e2e" }}
+            className="rounded-xl p-4 flex items-center justify-between"
+          >
+            <div>
+              <p className="text-white font-semibold text-sm">AI Agent</p>
+              <p
+                className={`text-xs font-medium mt-0.5 ${agentActive ? "text-[#00ff88]" : "text-gray-500"}`}
+              >
+                {agentActive ? "Agent Running" : "Agent Paused"}
+              </p>
+            </div>
+            <button
+              type="button"
+              data-ocid="pair-trade-detail.agent.toggle"
+              onClick={() => {
+                const next = !agentActive;
+                setAgentActive(next);
+                toggleAgentMutation.mutate({
+                  id: tradeId,
+                  isPairTrade: true,
+                  enabled: next,
+                });
+              }}
+              disabled={toggleAgentMutation.isPending}
+              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none ${agentActive ? "bg-[#00f5ff]" : "bg-gray-700"}`}
+            >
+              <span
+                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${agentActive ? "translate-x-6" : "translate-x-1"}`}
+              />
+            </button>
+          </div>
         </motion.div>
 
         {/* Live Prices */}

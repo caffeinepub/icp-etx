@@ -10,6 +10,10 @@ import Nat8 "mo:core/Nat8";
 import Principal "mo:core/Principal";
 import Map "mo:core/Map";
 import Runtime "mo:core/Runtime";
+import Error "mo:core/Error";
+import Debug "mo:core/Debug";
+import Nat32 "mo:core/Nat32";
+import Char "mo:core/Char";
 import OutCall "http-outcalls/outcall";
 import MixinAuthorization "authorization/MixinAuthorization";
 import AccessControl "authorization/access-control";
@@ -90,8 +94,6 @@ actor self {
   };
 
   // ICPSwap per-pair pool canister
-  // Route format: "ICPSwap-Direct:<pool-canister-id>" or "ICPSwap-ViaICP:<pool-canister-id>"
-  // Optionally append ":<true|false>" for zeroForOne direction (default: true)
   type ICPSwapPoolArgs = {
     zeroForOne : Bool;
     amountIn : Text;
@@ -102,6 +104,20 @@ actor self {
     depositFrom : (token : Principal, amount : Nat, fee : Nat) -> async { #ok : Nat; #err : Text };
     swap : (ICPSwapPoolArgs) -> async { #ok : Int; #err : Text };
     withdraw : (token : Principal, fee : Nat, amount : Nat) -> async { #ok : Nat; #err : Text };
+  };
+
+  // ─── ckBTC Minter Interface ─────────────────────────────────────────────────
+  // Official ckBTC minter: mqygn-kiaaa-aaaar-qaadq-cai
+  type CkBtcMinterActor = actor {
+    get_btc_address : (arg : { owner : ?Principal; subaccount : ?Blob }) -> async Text;
+    update_balance : (arg : { owner : ?Principal; subaccount : ?Blob }) -> async { #Ok : { block_index : Nat; amount : Nat }; #Err : Text };
+  };
+
+  // ─── ckETH Minter Interface ─────────────────────────────────────────────────
+  // Official ckETH minter: sv3dd-oaaaa-aaaar-qacoa-cai
+  type CkEthMinterActor = actor {
+    get_eth_address : () -> async { #Ok : Text; #Err : Text };
+    update_balance : () -> async { #Ok : { block_index : Nat; amount : Nat }; #Err : Text };
   };
 
   // ─── App Types ──────────────────────────────────────────────────────────────
@@ -203,6 +219,7 @@ actor self {
   let pairTrades = Map.empty<Nat, PairTrade>();
   var nextBasketId = 1;
   let baskets = Map.empty<Nat, Basket>();
+  let basketFocusAssets = Map.empty<Nat, Text>();
 
   var tradeCountThisMonth : Nat = 0;
   var tradeCountResetAt : Int = 0;
@@ -217,6 +234,10 @@ actor self {
 
   let approvedUntil = Map.empty<Principal, Int>();
   let decimalsRegistry = Map.empty<Principal, Nat8>();
+  let agentEnabled = Map.empty<Nat, Bool>();
+
+  // Dedicated subaccount index used for unique deposit address derivation
+  let dedicatedSubaccount : Nat = 0;
 
   // Pre-populate known ICP ecosystem tokens
   decimalsRegistry.add(Principal.fromText("ryjl3-tyaaa-aaaaa-aaaba-cai"), (8 : Nat8));  // ICP
@@ -226,22 +247,17 @@ actor self {
   decimalsRegistry.add(Principal.fromText("cngnf-vqaaa-aaaar-qag4q-cai"), (6 : Nat8));  // ckUSDT
 
   // ─── Token Universe Cache ────────────────────────────────────────────────────
-  // Raw JSON caches from each source; persisted across upgrades
   var dexScreenerCache : Text = "";
   var icpSwapCache : Text = "";
   var kongSwapCache : Text = "";
   var tokenCacheUpdatedAt : Int = 0;
 
   // ─── Portfolio Snapshot State ───────────────────────────────────────────────
-  // Stores up to 1000 snapshots; older entries are pruned automatically.
   var portfolioSnapshots : [PortfolioSnapshot] = [];
-  // Last known portfolio value in USD — updated whenever frontend calls getPortfolioValue().
-  // recordPortfolioSnapshot() uses this cached value so the timer can fire autonomously.
   var lastPortfolioValueUsd : Float = 0.0;
 
   // ─── Private Helpers ────────────────────────────────────────────────────────
 
-  // Get token decimals from registry, default to 8 if unknown
   func getDecimalsInternal(token : Principal) : Nat8 {
     switch (decimalsRegistry.get(token)) {
       case (?d) { d };
@@ -249,7 +265,6 @@ actor self {
     };
   };
 
-  // Float amount → Nat scaled by token decimals (e.g. 1.5 ICP → 150_000_000)
   func floatToNat(amount : Float, decimals : Nat8) : Nat {
     var mult : Float = 1.0;
     var i : Nat = 0;
@@ -258,7 +273,6 @@ actor self {
     if (raw <= 0) { 0 } else { Int.abs(raw) };
   };
 
-  // Nat amount → Float scaled by token decimals (avoids deprecated Float.fromInt)
   func natToFloat(amount : Nat, decimals : Nat8) : Float {
     var divisor : Float = 1.0;
     var i : Nat = 0;
@@ -274,32 +288,29 @@ actor self {
     result / divisor;
   };
 
-  // Internal: push a snapshot with the current lastPortfolioValueUsd, pruning to 1000 entries.
   func recordSnapshotInternal() : () {
     let snapshot : PortfolioSnapshot = {
       timestamp = Time.now();
       totalValueUsd = lastPortfolioValueUsd;
     };
     var updated = portfolioSnapshots.concat([snapshot]);
-    // Keep only the latest 1000 entries
     if (updated.size() > 1000) {
-      let dropCount = updated.size() - 1000;
-      updated := Array.tabulate(1000, func(i : Nat) : PortfolioSnapshot { updated[i + dropCount] });
+      let startIdx = updated.size() - 1000 : Nat;
+      updated := Array.tabulate(1000, func(i : Nat) : PortfolioSnapshot { updated[startIdx + i] });
     };
     portfolioSnapshots := updated;
   };
 
   // ─── 5-Minute Snapshot Timer ────────────────────────────────────────────────
-  // Fires every 5 minutes and records a portfolio snapshot using the last cached value.
   let fiveMinutesNs : Nat64 = 5 * 60 * 1_000_000_000;
 
   system func timer(setGlobalTimer : Nat64 -> ()) : async () {
-    // Schedule next fire in 5 minutes from now
     let nowNs : Int = Time.now();
     let nowNat : Nat = if (nowNs > 0) { Int.abs(nowNs) } else { 0 };
     let nextFire = Nat64.fromNat(nowNat) + fiveMinutesNs;
     setGlobalTimer(nextFire);
     recordSnapshotInternal();
+    runAgentCheckInternal();
   };
 
   // ─── User Profile Methods ────────────────────────────────────────────────────
@@ -401,7 +412,7 @@ actor self {
 
   // ─── HTTP Outcalls ───────────────────────────────────────────────────────────
 
-  public query ({ caller }) func transform(input : OutCall.TransformationInput) : async OutCall.TransformationOutput {
+  public query ({ caller = _ }) func transform(input : OutCall.TransformationInput) : async OutCall.TransformationOutput {
     OutCall.transform(input);
   };
 
@@ -432,13 +443,11 @@ actor self {
     result;
   };
 
-  // Returns all three raw JSON caches in a single query call (no HTTP cost)
   public query ({ caller }) func getTokenUniverseCaches() : async { dexScreener : Text; icpSwap : Text; kongSwap : Text; updatedAt : Int } {
     ignore caller;
     { dexScreener = dexScreenerCache; icpSwap = icpSwapCache; kongSwap = kongSwapCache; updatedAt = tokenCacheUpdatedAt };
   };
 
-  // Refreshes all three caches sequentially — can be called by frontend on init or on demand
   public shared ({ caller }) func updateTokenUniverse() : async () {
     ignore caller;
     let ds = try { await OutCall.httpGetRequest("https://api.dexscreener.com/latest/dex/pairs/icp", [], transform) } catch (_) { "" };
@@ -453,9 +462,6 @@ actor self {
     tokenCacheUpdatedAt := Time.now();
   };
 
-
-  // ─── Hardcoded Token Baseline ──────────────────────────────────────────────────────────────────
-  // Returns the 5 major ICP tokens as JSON — always available, zero API dependency.
   public query func getHardcodedTokens() : async Text {
     "{\"tokens\":[" #
     "{\"canisterId\":\"ryjl3-tyaaa-aaaaa-aaaba-cai\",\"symbol\":\"ICP\",\"name\":\"Internet Computer\",\"decimals\":8,\"priceUsd\":0}," #
@@ -537,7 +543,7 @@ actor self {
   // ─── Baskets ───────────────────────────────────────────────────────────────────
 
   public shared ({ caller }) func createBasket(
-    name : Text, description : Text, slots : [BasketSlot], rebalanceThresholdBps : Nat,
+    name : Text, description : Text, slots : [BasketSlot], rebalanceThresholdBps : Nat, focusAsset : Text,
   ) : async { #ok : Nat; #err : Text } {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       return #err("Unauthorized: Only users can create baskets");
@@ -555,6 +561,7 @@ actor self {
       createdAt = Time.now(); updatedAt = Time.now();
     };
     baskets.add(nextBasketId, newBasket);
+    basketFocusAssets.add(nextBasketId, focusAsset);
     nextBasketId += 1;
     #ok(newBasket.id);
   };
@@ -574,7 +581,7 @@ actor self {
   };
 
   public shared ({ caller }) func updateBasket(
-    id : Nat, name : Text, description : Text, slots : [BasketSlot], rebalanceThresholdBps : Nat,
+    id : Nat, name : Text, description : Text, slots : [BasketSlot], rebalanceThresholdBps : Nat, focusAsset : Text,
   ) : async { #ok; #err : Text } {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       return #err("Unauthorized: Only users can update baskets");
@@ -591,6 +598,7 @@ actor self {
       case (null) { return #err("Basket not found") };
       case (?existing) {
         baskets.add(id, { existing with name; description; slots; rebalanceThresholdBps; riskTier; updatedAt = Time.now() });
+        basketFocusAssets.add(id, focusAsset);
         #ok;
       };
     };
@@ -640,6 +648,16 @@ actor self {
     switch (baskets.get(id)) {
       case (null) { null };
       case (?basket) { ?basket.riskTier };
+    };
+  };
+
+  public query ({ caller }) func getBasketFocusAsset(id : Nat) : async Text {
+    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
+      Runtime.trap("Unauthorized: Only users can view baskets");
+    };
+    switch (basketFocusAssets.get(id)) {
+      case (null) { "" };
+      case (?fa) { fa };
     };
   };
 
@@ -748,7 +766,6 @@ actor self {
 
   // ─── Swap Execution — Real On-Chain ────────────────────────────────────────
 
-  // Quote estimate (3% slippage placeholder; real output determined by DEX at execution)
   public shared ({ caller }) func getSwapQuote(_tokenIn : Text, amountIn : Float, _tokenOut : Text) : async Float {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       Runtime.trap("Unauthorized: Only users can get swap quotes");
@@ -756,8 +773,6 @@ actor self {
     amountIn * 0.97;
   };
 
-  // Grant 24-hour trading permission. Must be called before every trading session.
-  // After calling this, owner must also icrc2_approve this canister on the tokenIn ledger.
   public shared ({ caller }) func grantTradingPermission() : async Text {
     switch (ownerPrincipal) {
       case (null) { return "Error: No owner set. Call setProfile first." };
@@ -769,7 +784,6 @@ actor self {
     "Trading permission granted for 24 hours. You may now execute real swaps.";
   };
 
-  // Revoke trading permission immediately.
   public shared ({ caller }) func revokeTradingPermission() : async Text {
     switch (ownerPrincipal) {
       case (null) { return "Error: No owner set." };
@@ -781,7 +795,6 @@ actor self {
     "All trading permissions revoked.";
   };
 
-  // Query current trading permission expiry (nanosecond timestamp, or null if not set).
   public query ({ caller }) func getTradingPermissionExpiry() : async ?Int {
     switch (ownerPrincipal) {
       case (null) { null };
@@ -791,7 +804,6 @@ actor self {
     };
   };
 
-  // Return the registered decimal count for a token (defaults to 8 if unknown).
   public query ({ caller }) func getDecimals(token : Principal) : async Nat8 {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       Runtime.trap("Unauthorized");
@@ -799,7 +811,6 @@ actor self {
     getDecimalsInternal(token);
   };
 
-  // Owner-only: override decimals for any token.
   public shared ({ caller }) func setDecimals(token : Principal, decimals : Nat8) : async () {
     switch (ownerPrincipal) {
       case (?owner) {
@@ -810,19 +821,6 @@ actor self {
     decimalsRegistry.add(token, decimals);
   };
 
-  // Execute a REAL on-chain swap via KongSwap or ICPSwap.
-  //
-  // tokenIn / tokenOut : ICRC-2 token ledger canister Principals
-  // route format:
-  //   KongSwap — "KongSwap-Direct" | "KongSwap-ViaICP"
-  //   ICPSwap  — "ICPSwap-Direct:<pool-id>" | "ICPSwap-ViaICP:<pool-id>"
-  //              Append ":<false>" to set zeroForOne=false (default: true)
-  //
-  // Prerequisites:
-  //   1. Call grantTradingPermission() on this canister.
-  //   2. Call icrc2_approve on the tokenIn ledger, approving THIS canister principal.
-  //
-  // Returns "EXEC-N-<dexTxId>" on success, error string on failure.
   public shared ({ caller }) func executeSwap(
     tokenIn : Principal,
     amountIn : Float,
@@ -831,7 +829,6 @@ actor self {
     priceImpactPct : Float,
   ) : async Text {
 
-    // 1. Single-user auth
     switch (ownerPrincipal) {
       case (null) { return "Error: No owner set. Call setProfile first." };
       case (?owner) {
@@ -839,7 +836,6 @@ actor self {
       };
     };
 
-    // 2. 24-hour trading permission check
     let expiry : Int = switch (approvedUntil.get(caller)) {
       case (null) { 0 };
       case (?ts) { ts };
@@ -848,15 +844,12 @@ actor self {
       return "Error: Trading permission expired or not granted. Call grantTradingPermission() first.";
     };
 
-    // 3. Convert amountIn Float -> Nat using token decimals
     let inDecimals = getDecimalsInternal(tokenIn);
     let amountNat = floatToNat(amountIn, inDecimals);
     if (amountNat == 0) {
       return "Error: Amount is zero after decimal conversion. Increase amountIn.";
     };
 
-    // 4. Pull tokens from owner wallet into this canister via ICRC-2 transferFrom
-    //    Owner must have called icrc2_approve on tokenIn ledger approving this canister.
     let myPrincipal = Principal.fromActor(self);
     let tokenInLedger = actor(tokenIn.toText()) : ICRC2Ledger;
 
@@ -973,8 +966,8 @@ actor self {
     }]);
     nextSwapReceiptId += 1;
 
-    // Auto-record a portfolio snapshot after every successful swap
     recordSnapshotInternal();
+    runAgentCheckInternal();
 
     execId;
   };
@@ -1005,8 +998,6 @@ actor self {
     swapReceipts.foldLeft(0.0, func(acc, r) { acc + r.realizedPnL });
   };
 
-  // getPortfolioValue: computes total USD value from a frontend-supplied price map.
-  // Also caches the result in lastPortfolioValueUsd so the snapshot timer has a value to store.
   public shared ({ caller }) func getPortfolioValue(priceMap : [(Text, Float)]) : async Float {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       Runtime.trap("Unauthorized: Only users can view portfolio value");
@@ -1017,7 +1008,6 @@ actor self {
         case (?(_, price)) { acc + h.balance * price };
       };
     });
-    // Cache for autonomous timer snapshots
     lastPortfolioValueUsd := value;
     value;
   };
@@ -1041,8 +1031,6 @@ actor self {
 
   // ─── Portfolio Snapshot Methods ─────────────────────────────────────────────
 
-  // Manually trigger a snapshot (uses the last known portfolio value from getPortfolioValue).
-  // The frontend should call getPortfolioValue() first to ensure the cache is fresh.
   public shared ({ caller }) func recordPortfolioSnapshot() : async Text {
     switch (ownerPrincipal) {
       case (null) { return "Error: No owner set." };
@@ -1051,11 +1039,10 @@ actor self {
       };
     };
     recordSnapshotInternal();
+    runAgentCheckInternal();
     "Snapshot recorded. totalValueUsd = " # lastPortfolioValueUsd.toText() # ", total snapshots = " # portfolioSnapshots.size().toText();
   };
 
-  // Returns snapshots from the last N days, sorted newest first.
-  // Pass 7 for 7-day chart, 30 for 30-day, 90 for 90-day, 0 for all history.
   public query ({ caller }) func getPortfolioHistory(days : Nat) : async [PortfolioSnapshot] {
     if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
       Runtime.trap("Unauthorized: Only users can view portfolio history");
@@ -1065,7 +1052,6 @@ actor self {
     let filtered = portfolioSnapshots.filter(func(s : PortfolioSnapshot) : Bool {
       s.timestamp >= cutoff;
     });
-    // Return newest first
     let size = filtered.size();
     Array.tabulate(size, func(i : Nat) : PortfolioSnapshot { filtered[size - 1 - i] });
   };
@@ -1077,7 +1063,6 @@ actor self {
     switch (baskets.get(basketId)) {
       case (null) { [] };
       case (?basket) {
-        // Calculate total basket value
         var totalBasketValue : Float = 0.0;
         for (slot in basket.slots.vals()) {
           switch (pairTrades.get(slot.pairTradeId)) {
@@ -1089,9 +1074,7 @@ actor self {
                 case (?holding) {
                   switch (priceMap.find(func((id, _)) { id == holding.tokenCanisterId })) {
                     case (null) {};
-                    case (?(_, price)) {
-                      totalBasketValue += holding.balance * price;
-                    };
+                    case (?(_, price)) { totalBasketValue += holding.balance * price };
                   };
                 };
               };
@@ -1099,13 +1082,11 @@ actor self {
           };
         };
 
-        // Calculate drift for each slot
-        let driftResults = Array.tabulate(
+        Array.tabulate(
           basket.slots.size(),
           func(i : Nat) : { slotIndex : Nat; driftBps : Int; direction : Text } {
             let slot = basket.slots[i];
             var actualWeightBps : Int = 0;
-
             if (totalBasketValue > 0.0) {
               switch (pairTrades.get(slot.pairTradeId)) {
                 case (null) {};
@@ -1126,15 +1107,51 @@ actor self {
                 };
               };
             };
-
             let drift = actualWeightBps - slot.targetWeightBps.toInt();
             let direction = if (drift > 0) { "over" } else if (drift < 0) { "under" } else { "on-target" };
             { slotIndex = i; driftBps = drift; direction };
           }
         );
-
-        driftResults;
       };
+    };
+  };
+
+  // ─── Wallet: Deposit Address Methods ──────────────────────────────────────
+
+  // Returns the canister's own principal as the ICP/ICRC-1 deposit address.
+  // Subaccount 0 is used (dedicatedSubaccount).
+  public query func getUniqueDepositAddress() : async Text {
+    let canisterId = Principal.fromActor(self);
+    canisterId.toText() # ":" # dedicatedSubaccount.toText();
+  };
+
+  // Returns the Bitcoin deposit address derived by the official ckBTC minter
+  // for this canister's principal + subaccount 0.
+  // ckBTC minter canister: mqygn-kiaaa-aaaar-qaadq-cai
+  public shared func getBtcDepositAddress() : async Text {
+    let minter = actor("mqygn-kiaaa-aaaar-qaadq-cai") : CkBtcMinterActor;
+    try {
+      await minter.get_btc_address({
+        owner = ?Principal.fromActor(self);
+        subaccount = null;
+      });
+    } catch (e) {
+      "Error: Could not retrieve BTC deposit address. " # e.message();
+    };
+  };
+
+  // Returns the Ethereum deposit address derived by the official ckETH minter
+  // for this canister's principal.
+  // ckETH minter canister: sv3dd-oaaaa-aaaar-qacoa-cai
+  public shared func getEthDepositAddress() : async Text {
+    let minter = actor("sv3dd-oaaaa-aaaar-qacoa-cai") : CkEthMinterActor;
+    try {
+      switch (await minter.get_eth_address()) {
+        case (#Ok(addr)) { addr };
+        case (#Err(e)) { "Error: " # e };
+      };
+    } catch (e) {
+      "Error: Could not retrieve ETH deposit address. " # e.message();
     };
   };
 
@@ -1224,6 +1241,283 @@ actor self {
       };
       case (#Err(e)) {
         "Error: withdraw failed. " # debug_show(e);
+      };
+    };
+  };
+
+
+  // ─── Smart Wallet: Trigger ckBTC minter balance update ─────────────────────
+  // Tells the ckBTC minter to scan for incoming BTC and mint ckBTC to this canister.
+  // Call this after sending BTC to the address returned by getBtcDepositAddress().
+  // ckBTC minter: mqygn-kiaaa-aaaar-qaadq-cai
+  public shared ({ caller }) func depositBtc() : async Text {
+    switch (ownerPrincipal) {
+      case (null) { return "Error: No owner set." };
+      case (?owner) {
+        if (caller != owner) { return "Unauthorized: this platform is single-user only." };
+      };
+    };
+    let minter = actor("mqygn-kiaaa-aaaar-qaadq-cai") : CkBtcMinterActor;
+    try {
+      let result = await minter.update_balance({
+        owner = ?Principal.fromActor(self);
+        subaccount = null;
+      });
+      switch (result) {
+        case (#Ok(r)) {
+          "ckBTC deposit processed. Block index: " # r.block_index.toText() # ", Amount: " # r.amount.toText();
+        };
+        case (#Err(e)) {
+          "ckBTC minter error: " # e;
+        };
+      };
+    } catch (e) {
+      "Error calling ckBTC minter: " # e.message();
+    };
+  };
+
+  // ─── Smart Wallet: Trigger ckETH minter balance update ─────────────────────
+  // Tells the ckETH minter to scan for incoming ETH and mint ckETH to this canister.
+  // Call this after sending ETH to the address returned by getEthDepositAddress().
+  // ckETH minter: sv3dd-oaaaa-aaaar-qacoa-cai
+  public shared ({ caller }) func depositEth() : async Text {
+    switch (ownerPrincipal) {
+      case (null) { return "Error: No owner set." };
+      case (?owner) {
+        if (caller != owner) { return "Unauthorized: this platform is single-user only." };
+      };
+    };
+    let minter = actor("sv3dd-oaaaa-aaaar-qacoa-cai") : CkEthMinterActor;
+    try {
+      let result = await minter.update_balance();
+      switch (result) {
+        case (#Ok(r)) {
+          "ckETH deposit processed. Block index: " # r.block_index.toText() # ", Amount: " # r.amount.toText();
+        };
+        case (#Err(e)) {
+          "ckETH minter error: " # e;
+        };
+      };
+    } catch (e) {
+      "Error calling ckETH minter: " # e.message();
+    };
+  };
+
+  // Stub — frontend handles the real Internet Identity re-authentication flow
+  public shared func requireIIVerification() : async Bool {
+    return true;
+  };
+
+  // Withdraw with optional denomination conversion.
+  // outputToken: "ICP" | "ckBTC" | "ckETH" | "Individual"
+  // "Individual" means withdraw sourceToken as-is (no conversion).
+  // For ICP/ckBTC/ckETH, if sourceToken != targetToken, performs a KongSwap-Direct swap
+  // first (requires active 24h trading permission) then transfers the result to destination.
+  public shared ({ caller }) func withdrawWithDenomination(
+    sourceToken : Principal,
+    amount : Float,
+    outputToken : Text,
+    destination : Principal,
+  ) : async Text {
+
+    let owner = switch (ownerPrincipal) {
+      case (null) { return "Error: Owner not set." };
+      case (?o) { o };
+    };
+    if (caller != owner) {
+      return "Unauthorized: this platform is single-user only.";
+    };
+
+    let icpPrincipal   = Principal.fromText("ryjl3-tyaaa-aaaaa-aaaba-cai");
+    let ckBtcPrincipal = Principal.fromText("mxzaz-hqaaa-aaaar-qaada-cai");
+    let ckEthPrincipal = Principal.fromText("ss2fx-dyaaa-aaaar-qacoq-cai");
+
+    let targetToken : Principal = switch (outputToken) {
+      case "ICP"   { icpPrincipal  };
+      case "ckBTC" { ckBtcPrincipal };
+      case "ckETH" { ckEthPrincipal };
+      case _       { sourceToken   };
+    };
+
+    let needsConversion = sourceToken != targetToken;
+    let myPrincipal = Principal.fromActor(self);
+
+    var withdrawToken = targetToken;
+    var withdrawAmount = amount;
+
+    if (needsConversion) {
+      let expiry : Int = switch (approvedUntil.get(owner)) {
+        case (null) { 0 };
+        case (?ts)  { ts };
+      };
+      if (Time.now() >= expiry) {
+        return "Error: Trading permission expired or not granted. Call grantTradingPermission() first.";
+      };
+
+      let srcDecimals = getDecimalsInternal(sourceToken);
+      let amountNat   = floatToNat(amount, srcDecimals);
+      if (amountNat == 0) {
+        return "Error: Amount is zero after decimal conversion.";
+      };
+
+      let srcLedger = actor(sourceToken.toText()) : ICRC2Ledger;
+      let pullResult = await srcLedger.icrc2_transfer_from({
+        spender_subaccount = null;
+        from = { owner = owner; subaccount = null };
+        to   = { owner = myPrincipal; subaccount = null };
+        amount = amountNat;
+        fee  = null;
+        memo = null;
+        created_at_time = null;
+      });
+
+      switch (pullResult) {
+        case (#Err(_)) {
+          return "Error: icrc2_transfer_from failed. Ensure you approved canister " #
+                 myPrincipal.toText() # " on the " # sourceToken.toText() # " ledger.";
+        };
+        case (#Ok(_)) {};
+      };
+
+      let kong = actor("2ipq2-uqaaa-aaaar-qailq-cai") : KongSwapActor;
+      switch (await kong.swap_async({
+        pay_token       = sourceToken.toText();
+        pay_amount      = amountNat;
+        pay_tx_id       = null;
+        receive_token   = targetToken.toText();
+        receive_amount  = null;
+        receive_address = null;
+        max_slippage    = ?1.5;
+        referred_by     = null;
+        bypass_amount_check = ?false;
+      })) {
+        case (#Err(e)) {
+          return "Error: KongSwap conversion failed: " # e;
+        };
+        case (#Ok(_)) {
+          withdrawAmount := amount * 0.99;
+        };
+      };
+    };
+
+    let dstDecimals = getDecimalsInternal(withdrawToken);
+    let outNat      = floatToNat(withdrawAmount, dstDecimals);
+    if (outNat == 0) {
+      return "Error: Withdraw amount is zero after decimal conversion.";
+    };
+
+    let dstLedger = actor(withdrawToken.toText()) : ICRC1Ledger;
+    let xferResult = await dstLedger.icrc1_transfer({
+      to   = { owner = destination; subaccount = null };
+      amount = outNat;
+      fee  = null;
+      memo = null;
+      from_subaccount = null;
+      created_at_time = null;
+    });
+
+    switch (xferResult) {
+      case (#Ok(blockIndex)) {
+        let tokenText = withdrawToken.toText();
+        holdings := holdings.map(func(h : Holding) : Holding {
+          if (h.tokenCanisterId == tokenText) {
+            { h with balance = Float.max(0.0, h.balance - withdrawAmount) }
+          } else { h }
+        });
+        "Withdrawal successful. Token: " # outputToken #
+          ", Amount: " # withdrawAmount.toText() #
+          ", Block: " # blockIndex.toText() #
+          ", Destination: " # destination.toText();
+      };
+      case (#Err(e)) {
+        "Error: icrc1_transfer failed: " # debug_show(e);
+      };
+    };
+  };
+
+
+  // ─── Agent Toggle ────────────────────────────────────────────────────────────
+  public shared ({ caller }) func toggleAgent(id : Nat, _isPairTrade : Bool, enabled : Bool) : async Bool {
+    if (not (AccessControl.hasPermission(accessControlState, caller, #user))) {
+      Runtime.trap("Unauthorized: this platform is single-user only");
+    };
+    agentEnabled.add(id, enabled);
+    enabled
+  };
+
+  func analyzeAndDecide(id: Nat, isPairTrade: Bool, focusAssetPrice: Float, indicatorSummary: Text) : Text {
+    let kind = if (isPairTrade) "PairTrade" else "Basket";
+    Debug.print("Analyzing indicators for ID " # id.toText() # " (" # kind # ")...");
+    Debug.print("Indicators: " # indicatorSummary);
+    Debug.print("Focus price: $" # focusAssetPrice.toText());
+
+    // Parse RSI from summary (e.g. "RSI=42.3, MACD=bearish, ...")
+    var rsiVal : Float = 50.0;
+    var macdBullish : Bool = false;
+    var macdBearish : Bool = false;
+
+    // Helper: parse float from digit chars using dot notation
+    func parseFloat(s: Text) : Float {
+      var result : Float = 0.0;
+      var decimal : Bool = false;
+      var decimalPlace : Float = 0.1;
+      for (c in s.chars()) {
+        if (c == '.') { decimal := true }
+        else if (c >= '0' and c <= '9') {
+          let digit : Float = (c.toNat32().toNat() - 48 : Nat).toFloat();
+          if (decimal) {
+            result += digit * decimalPlace;
+            decimalPlace *= 0.1;
+          } else {
+            result := result * 10.0 + digit;
+          };
+        };
+      };
+      result
+    };
+
+    for (part in indicatorSummary.split(#char ',')) {
+      let trimmed = part.trim(#char ' ');
+      if (trimmed.startsWith(#text "RSI=")) {
+        // Extract value after "RSI=" by splitting on "="
+        var skipFirst = true;
+        for (ep in trimmed.split(#char '=')) {
+          if (skipFirst) { skipFirst := false }
+          else { rsiVal := parseFloat(ep) };
+        };
+      };
+      if (trimmed.contains(#text "MACD=bullish") or trimmed.contains(#text "MACD=up")) {
+        macdBullish := true;
+      };
+      if (trimmed.contains(#text "MACD=bearish") or trimmed.contains(#text "MACD=down")) {
+        macdBearish := true;
+      };
+    };
+
+    let focusLabel = if (not isPairTrade) {
+      switch (basketFocusAssets.get(id)) {
+        case (?canisterId) { if (canisterId == "") "focusAsset" else canisterId };
+        case null { "focusAsset" };
+      }
+    } else { "focusAsset" };
+
+    let decision = if (rsiVal < 35.0 and macdBullish) {
+      "BUY " # focusLabel
+    } else if (rsiVal > 65.0 and macdBearish) {
+      "SELL " # focusLabel
+    } else {
+      "HOLD"
+    };
+
+    Debug.print("Decision: " # decision # " | RSI=" # rsiVal.toText() # " | Focus price: $" # focusAssetPrice.toText());
+    "Decision: " # decision # " | Focus price: $" # focusAssetPrice.toText()
+  };
+
+  func runAgentCheckInternal() : () {
+    for ((id, isEnabled) in agentEnabled.entries()) {
+      if (isEnabled) {
+        let decision = analyzeAndDecide(id, true, 0.0, "no summary provided");
+        Debug.print("Agent check for ID " # id.toText() # " => " # decision);
       };
     };
   };
