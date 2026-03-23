@@ -129,7 +129,7 @@ function QRCodeSVG({
     </svg>
   );
 }
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import type { FundingEntry } from "../backend";
 import { FundingEntryType } from "../backend";
@@ -144,6 +144,7 @@ import {
   useDepositEth,
   useEthDepositAddress,
   useFundingEntries,
+  useGrantTradingPermission,
   useHoldings,
   useICPPrice,
   usePortfolioValue,
@@ -151,6 +152,7 @@ import {
   useSwapReceipts,
   useSyncBalances,
   useTokenUniverse,
+  useTradingPermissionExpiry,
   useUniqueDepositAddress,
   useWithdrawWithDenomination,
 } from "../hooks/useQueries";
@@ -336,6 +338,8 @@ function AddressCard({
   triggerLabel,
   isTriggerPending,
   icon,
+  error,
+  onRetry,
 }: {
   chain: string;
   label: string;
@@ -350,6 +354,8 @@ function AddressCard({
   triggerLabel?: string;
   isTriggerPending?: boolean;
   icon: React.ReactNode;
+  error?: string;
+  onRetry?: () => void;
 }) {
   const [localCopied, setLocalCopied] = useState(false);
 
@@ -489,6 +495,29 @@ function AddressCard({
           </AnimatePresence>
         </Button>
       </div>
+
+      {/* Error + individual retry */}
+      {error && (
+        <div className="space-y-2">
+          <p className="text-xs font-semibold" style={{ color: "#ff3366" }}>
+            ❌ {error}
+          </p>
+          {onRetry && (
+            <Button
+              size="sm"
+              className="w-full text-xs font-semibold"
+              style={{
+                background: "rgba(255,51,102,0.12)",
+                color: "#ff3366",
+                border: "1px solid rgba(255,51,102,0.35)",
+              }}
+              onClick={onRetry}
+            >
+              <RefreshCw className="w-3 h-3 mr-1" /> Retry This Address
+            </Button>
+          )}
+        </div>
+      )}
 
       {/* Trigger conversion button */}
       {onTrigger && triggerLabel && (
@@ -684,6 +713,17 @@ type OutputToken = "ICP" | "ckBTC" | "ckETH" | "Individual";
 export default function WalletPage() {
   const [currency, setCurrency] = useState<"USD" | "ICP">("USD");
   const [activeTab, setActiveTab] = useState("overview");
+  const [icpError, setIcpError] = useState<string | null>(null);
+  const [btcError, setBtcError] = useState<string | null>(null);
+  const [ethError, setEthError] = useState<string | null>(null);
+  // Debug panel state
+  const [icpRawResponse, setIcpRawResponse] = useState<string>("");
+  const [btcRawResponse, setBtcRawResponse] = useState<string>("");
+  const [ethRawResponse, setEthRawResponse] = useState<string>("");
+  const [icpTestError, setIcpTestError] = useState<string>("");
+  const [btcTestError, setBtcTestError] = useState<string>("");
+  const [ethTestError, setEthTestError] = useState<string>("");
+  const [isTestRunning, setIsTestRunning] = useState(false);
   const [swapDialogOpen, setSwapDialogOpen] = useState(false);
   const [swapTokenIn, setSwapTokenIn] = useState<string | undefined>();
 
@@ -727,6 +767,8 @@ export default function WalletPage() {
   } = useEthDepositAddress();
   const depositBtc = useDepositBtc();
   const depositEth = useDepositEth();
+  const grantPermission = useGrantTradingPermission();
+  const { data: permissionExpiry } = useTradingPermissionExpiry();
 
   // II auth
   const { login, loginStatus, identity } = useInternetIdentity();
@@ -785,17 +827,197 @@ export default function WalletPage() {
     if (ethAddress) console.log("✅ ETH Address loaded:", ethAddress);
   }, [ethAddress]);
 
-  // Force-fetch all deposit addresses on mount when actor + identity are ready
+  // Force-fetch all deposit addresses: 8 retries, 1.2s delay, per-address tracking
   const depositMountedRef = useRef(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: intentionally runs once on mount via ref guard
   useEffect(() => {
-    if (actor && identity && !depositMountedRef.current) {
-      depositMountedRef.current = true;
-      console.log("🔄 Deposit tab mounted, forcing address fetch...");
-      refetchIcp();
-      refetchBtc();
-      refetchEth();
+    if (!identity) return;
+    if (depositMountedRef.current) return;
+    depositMountedRef.current = true;
+
+    const MAX = 8;
+    const DELAY = 1200;
+
+    const retryAddr = async (
+      name: string,
+      fetchFn: () => Promise<unknown>,
+      check: () => boolean,
+      onError: (msg: string) => void,
+      clearError: () => void,
+    ) => {
+      clearError();
+      for (let attempt = 1; attempt <= MAX; attempt++) {
+        console.log(`🔄 Attempt ${attempt}/${MAX} for ${name}`);
+        try {
+          await fetchFn();
+          if (check()) {
+            console.log(`✅ Loaded ${name}`);
+            clearError();
+            return;
+          }
+        } catch (e) {
+          console.log(`❌ Failed ${name} attempt ${attempt}:`, e);
+        }
+        if (attempt < MAX) await new Promise((r) => setTimeout(r, DELAY));
+      }
+      const msg = `Failed to load after ${MAX} attempts`;
+      console.log(`❌ Failed ${name}: ${msg}`);
+      onError(msg);
+    };
+
+    retryAddr(
+      "ICP",
+      () => refetchIcp(),
+      () => !!icpAddress,
+      (m) => setIcpError(m),
+      () => setIcpError(null),
+    );
+    retryAddr(
+      "BTC",
+      () => refetchBtc(),
+      () => !!btcAddress,
+      (m) => setBtcError(m),
+      () => setBtcError(null),
+    );
+    retryAddr(
+      "ETH",
+      () => refetchEth(),
+      () => !!ethAddress,
+      (m) => setEthError(m),
+      () => setEthError(null),
+    );
+  }, [actor, identity]);
+
+  const retryIcp = useCallback(async () => {
+    setIcpError(null);
+    const MAX = 8;
+    const DELAY = 1200;
+    for (let i = 1; i <= MAX; i++) {
+      console.log(`🔄 Attempt ${i}/${MAX} for ICP`);
+      try {
+        await refetchIcp();
+        if (icpAddress) {
+          console.log("✅ Loaded ICP");
+          return;
+        }
+      } catch (e) {
+        console.log(`❌ Failed ICP attempt ${i}:`, e);
+      }
+      if (i < MAX) await new Promise((r) => setTimeout(r, DELAY));
     }
-  }, [actor, identity, refetchIcp, refetchBtc, refetchEth]);
+    setIcpError(`Failed to load after ${MAX} attempts`);
+  }, [refetchIcp, icpAddress]);
+
+  const retryBtc = useCallback(async () => {
+    setBtcError(null);
+    const MAX = 8;
+    const DELAY = 1200;
+    for (let i = 1; i <= MAX; i++) {
+      console.log(`🔄 Attempt ${i}/${MAX} for BTC`);
+      try {
+        await refetchBtc();
+        if (btcAddress) {
+          console.log("✅ Loaded BTC");
+          return;
+        }
+      } catch (e) {
+        console.log(`❌ Failed BTC attempt ${i}:`, e);
+      }
+      if (i < MAX) await new Promise((r) => setTimeout(r, DELAY));
+    }
+    setBtcError(`Failed to load after ${MAX} attempts`);
+  }, [refetchBtc, btcAddress]);
+
+  const retryEth = useCallback(async () => {
+    setEthError(null);
+    const MAX = 8;
+    const DELAY = 1200;
+    for (let i = 1; i <= MAX; i++) {
+      console.log(`🔄 Attempt ${i}/${MAX} for ETH`);
+      try {
+        await refetchEth();
+        if (ethAddress) {
+          console.log("✅ Loaded ETH");
+          return;
+        }
+      } catch (e) {
+        console.log(`❌ Failed ETH attempt ${i}:`, e);
+      }
+      if (i < MAX) await new Promise((r) => setTimeout(r, DELAY));
+    }
+    setEthError(`Failed to load after ${MAX} attempts`);
+  }, [refetchEth, ethAddress]);
+
+  const testIcpAddress = useCallback(async () => {
+    setIcpTestError("");
+    setIcpRawResponse("Testing...");
+    try {
+      console.log("[Debug] Testing ICP address...", {
+        actor: !!actor,
+        identity: !!identity,
+      });
+      const result = await (actor as any).getUniqueDepositAddress();
+      const raw = String(result ?? "null/undefined");
+      console.log("[Debug] ICP raw response:", raw);
+      setIcpRawResponse(raw);
+      setIcpTestError("");
+    } catch (e: any) {
+      const errMsg = e?.message ?? String(e);
+      console.error("[Debug] ICP test error:", errMsg);
+      setIcpRawResponse("");
+      setIcpTestError(errMsg);
+    }
+  }, [actor, identity]);
+
+  const testBtcAddress = useCallback(async () => {
+    setBtcTestError("");
+    setBtcRawResponse("Testing...");
+    try {
+      console.log("[Debug] Testing BTC address...", {
+        actor: !!actor,
+        identity: !!identity,
+      });
+      const result = await (actor as any).getBtcDepositAddress();
+      const raw = String(result ?? "null/undefined");
+      console.log("[Debug] BTC raw response:", raw);
+      setBtcRawResponse(raw);
+      setBtcTestError("");
+    } catch (e: any) {
+      const errMsg = e?.message ?? String(e);
+      console.error("[Debug] BTC test error:", errMsg);
+      setBtcRawResponse("");
+      setBtcTestError(errMsg);
+    }
+  }, [actor, identity]);
+
+  const testEthAddress = useCallback(async () => {
+    setEthTestError("");
+    setEthRawResponse("Testing...");
+    try {
+      console.log("[Debug] Testing ETH address...", {
+        actor: !!actor,
+        identity: !!identity,
+      });
+      const result = await (actor as any).getEthDepositAddress();
+      const raw = String(result ?? "null/undefined");
+      console.log("[Debug] ETH raw response:", raw);
+      setEthRawResponse(raw);
+      setEthTestError("");
+    } catch (e: any) {
+      const errMsg = e?.message ?? String(e);
+      console.error("[Debug] ETH test error:", errMsg);
+      setEthRawResponse("");
+      setEthTestError(errMsg);
+    }
+  }, [actor, identity]);
+
+  const runAllTests = useCallback(async () => {
+    setIsTestRunning(true);
+    console.log("[Debug] Running all tests...");
+    await Promise.all([testIcpAddress(), testBtcAddress(), testEthAddress()]);
+    setIsTestRunning(false);
+    console.log("[Debug] All tests complete");
+  }, [testIcpAddress, testBtcAddress, testEthAddress]);
 
   function executeWithdrawal() {
     if (!withdrawToken || !withdrawAmount || !withdrawDest) return;
@@ -1077,6 +1299,8 @@ export default function WalletPage() {
               accentColor="#00f5ff"
               onCopy={() => toast.success("ICP deposit address copied!")}
               icon={<Wallet className="w-4 h-4" />}
+              error={icpError ?? undefined}
+              onRetry={retryIcp}
             />
 
             {/* Bitcoin Card */}
@@ -1090,6 +1314,8 @@ export default function WalletPage() {
               qrColor="#f7931a"
               accentColor="#f7931a"
               onCopy={() => toast.success("Bitcoin deposit address copied!")}
+              error={btcError ?? undefined}
+              onRetry={retryBtc}
               onTrigger={() =>
                 depositBtc.mutate(undefined, {
                   onSuccess: (msg) =>
@@ -1117,6 +1343,8 @@ export default function WalletPage() {
               qrColor="#627eea"
               accentColor="#627eea"
               onCopy={() => toast.success("Ethereum deposit address copied!")}
+              error={ethError ?? undefined}
+              onRetry={retryEth}
               onTrigger={() =>
                 depositEth.mutate(undefined, {
                   onSuccess: (msg) =>
@@ -1140,21 +1368,88 @@ export default function WalletPage() {
               }
             />
 
+            {/* Grant 24hr Trading Permission */}
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="rounded-xl p-4 space-y-3"
+              style={{
+                background:
+                  "linear-gradient(135deg, rgba(0,245,255,0.08), rgba(0,245,255,0.04))",
+                border: "1px solid rgba(0,245,255,0.35)",
+                boxShadow: "0 0 20px rgba(0,245,255,0.08)",
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <Shield className="w-5 h-5" style={{ color: "#00f5ff" }} />
+                <span className="font-bold text-white text-sm">
+                  24hr Trading Permission
+                </span>
+              </div>
+              <p className="text-xs" style={{ color: "#9ca3af" }}>
+                Required for autonomous agent trades. Grant once every 24 hours.
+              </p>
+              {permissionExpiry &&
+              Number(permissionExpiry) > Date.now() * 1_000_000 ? (
+                <div
+                  className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold"
+                  style={{
+                    background: "rgba(0,255,136,0.1)",
+                    color: "#00ff88",
+                    border: "1px solid rgba(0,255,136,0.25)",
+                  }}
+                >
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  Permission active until{" "}
+                  {new Date(
+                    Number(permissionExpiry) / 1_000_000,
+                  ).toLocaleString()}
+                </div>
+              ) : (
+                <Button
+                  className="w-full font-bold text-sm py-2"
+                  style={{
+                    background: "linear-gradient(135deg, #00f5ff, #00c8d4)",
+                    color: "#0a0a0f",
+                    boxShadow: "0 0 16px rgba(0,245,255,0.4)",
+                    border: "none",
+                  }}
+                  onClick={() =>
+                    grantPermission.mutate(undefined, {
+                      onSuccess: () =>
+                        toast.success("✅ 24hr trading permission granted!"),
+                      onError: (e) => toast.error(String(e)),
+                    })
+                  }
+                  disabled={!identity || grantPermission.isPending}
+                  data-ocid="wallet.deposit.primary_button"
+                >
+                  {grantPermission.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <Zap className="w-4 h-4 mr-2" />
+                  )}
+                  {grantPermission.isPending
+                    ? "Granting..."
+                    : "Grant 24hr Trading Permission"}
+                </Button>
+              )}
+            </motion.div>
+
             {/* Refresh Addresses */}
             <Button
               className="w-full font-semibold text-base py-3"
               style={{
                 background:
-                  "linear-gradient(135deg, rgba(123,47,255,0.2), rgba(0,245,255,0.1))",
+                  "linear-gradient(135deg, rgba(123,47,255,0.25), rgba(0,245,255,0.15))",
                 color: "#00f5ff",
-                border: "1px solid rgba(0,245,255,0.3)",
-                boxShadow: "0 0 12px rgba(0,245,255,0.1)",
+                border: "1px solid rgba(0,245,255,0.4)",
+                boxShadow: "0 0 16px rgba(0,245,255,0.15)",
               }}
               onClick={() => {
-                refetchIcp();
-                refetchBtc();
-                refetchEth();
-                toast.info("Refreshing deposit addresses...");
+                retryIcp();
+                retryBtc();
+                retryEth();
               }}
               disabled={icpAddrLoading || btcAddrLoading || ethAddrLoading}
               data-ocid="wallet.deposit.secondary_button"
@@ -1166,7 +1461,7 @@ export default function WalletPage() {
               )}
               {icpAddrLoading || btcAddrLoading || ethAddrLoading
                 ? "Loading addresses..."
-                : "Refresh All Addresses"}
+                : "Force Refresh All 3 Addresses"}
             </Button>
 
             {/* Refresh Balances */}
@@ -1210,6 +1505,228 @@ export default function WalletPage() {
                 Balances synced from ledger
               </motion.div>
             )}
+
+            {/* ── Debug Panel ───────────────────────────────────────────── */}
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="rounded-xl p-4 space-y-4 mt-4"
+              style={{
+                background: "rgba(255,255,0,0.04)",
+                border: "1px solid rgba(255,255,0,0.25)",
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className="text-xs font-bold"
+                  style={{ color: "#facc15" }}
+                >
+                  🔬 DEBUG PANEL
+                </span>
+              </div>
+              {/* Principal & Actor Status */}
+              <div
+                className="space-y-1 text-xs font-mono"
+                style={{ color: "#9ca3af" }}
+              >
+                <div>
+                  <span style={{ color: "#facc15" }}>
+                    Current II Principal:{" "}
+                  </span>
+                  <span style={{ color: "#fff", wordBreak: "break-all" }}>
+                    {identity?.getPrincipal().toString() ?? "Not authenticated"}
+                  </span>
+                </div>
+                <div>
+                  <span style={{ color: "#facc15" }}>Actor Status: </span>
+                  <span
+                    style={{
+                      color: !identity
+                        ? "#facc15"
+                        : actor
+                          ? "#00ff88"
+                          : "#ef4444",
+                    }}
+                  >
+                    {!identity
+                      ? "Authenticating..."
+                      : actor
+                        ? "Ready"
+                        : "Not Ready"}
+                  </span>
+                </div>
+              </div>
+              {/* ICP Test */}
+              <div
+                className="rounded-lg p-3 space-y-2"
+                style={{
+                  background: "rgba(0,245,255,0.06)",
+                  border: "1px solid rgba(0,245,255,0.2)",
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <span
+                    className="text-xs font-bold"
+                    style={{ color: "#00f5ff" }}
+                  >
+                    ICP Address Test
+                  </span>
+                  <Button
+                    size="sm"
+                    className="text-xs px-3 py-1 h-7"
+                    style={{
+                      background: "rgba(0,245,255,0.15)",
+                      color: "#00f5ff",
+                      border: "1px solid rgba(0,245,255,0.4)",
+                    }}
+                    onClick={testIcpAddress}
+                    disabled={!identity}
+                  >
+                    Test ICP Address
+                  </Button>
+                </div>
+                {icpRawResponse && (
+                  <div
+                    className="text-xs font-mono"
+                    style={{ color: "#9ca3af" }}
+                  >
+                    <span style={{ color: "#facc15" }}>Raw Response: </span>
+                    <span style={{ color: "#fff", wordBreak: "break-all" }}>
+                      {icpRawResponse}
+                    </span>
+                  </div>
+                )}
+                {icpTestError && (
+                  <div
+                    className="text-xs font-mono"
+                    style={{ color: "#ef4444", wordBreak: "break-all" }}
+                  >
+                    ❌ Error: {icpTestError}
+                  </div>
+                )}
+              </div>
+              {/* BTC Test */}
+              <div
+                className="rounded-lg p-3 space-y-2"
+                style={{
+                  background: "rgba(247,147,26,0.06)",
+                  border: "1px solid rgba(247,147,26,0.2)",
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <span
+                    className="text-xs font-bold"
+                    style={{ color: "#f7931a" }}
+                  >
+                    BTC Address Test
+                  </span>
+                  <Button
+                    size="sm"
+                    className="text-xs px-3 py-1 h-7"
+                    style={{
+                      background: "rgba(247,147,26,0.15)",
+                      color: "#f7931a",
+                      border: "1px solid rgba(247,147,26,0.4)",
+                    }}
+                    onClick={testBtcAddress}
+                    disabled={!identity}
+                  >
+                    Test BTC Address
+                  </Button>
+                </div>
+                {btcRawResponse && (
+                  <div
+                    className="text-xs font-mono"
+                    style={{ color: "#9ca3af" }}
+                  >
+                    <span style={{ color: "#facc15" }}>Raw Response: </span>
+                    <span style={{ color: "#fff", wordBreak: "break-all" }}>
+                      {btcRawResponse}
+                    </span>
+                  </div>
+                )}
+                {btcTestError && (
+                  <div
+                    className="text-xs font-mono"
+                    style={{ color: "#ef4444", wordBreak: "break-all" }}
+                  >
+                    ❌ Error: {btcTestError}
+                  </div>
+                )}
+              </div>
+              {/* ETH Test */}
+              <div
+                className="rounded-lg p-3 space-y-2"
+                style={{
+                  background: "rgba(98,126,234,0.06)",
+                  border: "1px solid rgba(98,126,234,0.2)",
+                }}
+              >
+                <div className="flex items-center justify-between">
+                  <span
+                    className="text-xs font-bold"
+                    style={{ color: "#627eea" }}
+                  >
+                    ETH Address Test
+                  </span>
+                  <Button
+                    size="sm"
+                    className="text-xs px-3 py-1 h-7"
+                    style={{
+                      background: "rgba(98,126,234,0.15)",
+                      color: "#627eea",
+                      border: "1px solid rgba(98,126,234,0.4)",
+                    }}
+                    onClick={testEthAddress}
+                    disabled={!identity}
+                  >
+                    Test ETH Address
+                  </Button>
+                </div>
+                {ethRawResponse && (
+                  <div
+                    className="text-xs font-mono"
+                    style={{ color: "#9ca3af" }}
+                  >
+                    <span style={{ color: "#facc15" }}>Raw Response: </span>
+                    <span style={{ color: "#fff", wordBreak: "break-all" }}>
+                      {ethRawResponse}
+                    </span>
+                  </div>
+                )}
+                {ethTestError && (
+                  <div
+                    className="text-xs font-mono"
+                    style={{ color: "#ef4444", wordBreak: "break-all" }}
+                  >
+                    ❌ Error: {ethTestError}
+                  </div>
+                )}
+              </div>
+              {/* Run All Tests Button */}
+              <Button
+                className="w-full font-bold text-sm py-2"
+                style={{
+                  background: isTestRunning
+                    ? "rgba(250,204,21,0.1)"
+                    : "linear-gradient(135deg, rgba(250,204,21,0.2), rgba(250,204,21,0.1))",
+                  color: "#facc15",
+                  border: "1px solid rgba(250,204,21,0.4)",
+                  boxShadow: "0 0 12px rgba(250,204,21,0.1)",
+                }}
+                onClick={runAllTests}
+                disabled={!identity || isTestRunning}
+              >
+                {isTestRunning ? (
+                  <>
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                    Running Tests...
+                  </>
+                ) : (
+                  <>🔬 Run All Tests</>
+                )}
+              </Button>
+            </motion.div>
           </TabsContent>
 
           {/* ── Withdraw Tab ──────────────────────────────────────────── */}

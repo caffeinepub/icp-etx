@@ -243,6 +243,21 @@ export const idlService = IDL.Service({
       [IDL.Record({ 'valid' : IDL.Bool, 'error' : IDL.Opt(IDL.Text) })],
       ['query'],
     ),
+  'analyzeAndDecide' : IDL.Func([IDL.Nat, IDL.Bool, IDL.Float64, IDL.Text], [IDL.Text], []),
+  'depositBtc' : IDL.Func([], [IDL.Text], []),
+  'depositEth' : IDL.Func([], [IDL.Text], []),
+  'getBasketFocusAsset' : IDL.Func([IDL.Nat], [IDL.Text], ['query']),
+  'getBtcDepositAddress' : IDL.Func([], [IDL.Text], []),
+  'getCanisterId' : IDL.Func([], [IDL.Principal], ['query']),
+  'getEthDepositAddress' : IDL.Func([], [IDL.Text], []),
+  'getHardcodedTokens' : IDL.Func([], [IDL.Text], ['query']),
+  'getPortfolioHistory' : IDL.Func([IDL.Nat], [IDL.Vec(IDL.Record({ 'timestamp' : IDL.Int, 'valueUsd' : IDL.Float64 }))], ['query']),
+  'getUniqueDepositAddress' : IDL.Func([], [IDL.Text], ['query']),
+  'requireIIVerification' : IDL.Func([], [IDL.Bool], ['query']),
+  'syncBalances' : IDL.Func([], [IDL.Text], []),
+  'toggleAgent' : IDL.Func([IDL.Nat, IDL.Bool, IDL.Bool], [IDL.Bool], []),
+  'updateScalpingMode' : IDL.Func([IDL.Nat, IDL.Bool], [IDL.Bool], []),
+  'withdrawWithDenomination' : IDL.Func([IDL.Text, IDL.Float64, IDL.Text, IDL.Principal], [IDL.Text], []),
 });
 
 export const idlInitArgs = [];
