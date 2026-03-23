@@ -41,8 +41,10 @@ import { usePairTrades } from "../hooks/usePairTrades";
 import {
   useAnalyzeAndDecide,
   useBasketDrift,
+  useSwapReceipts,
   useToggleAgent,
   useTokenUniverse,
+  useUpdateScalpingMode,
 } from "../hooks/useQueries";
 
 import { computeEMACrossover, computeMACD, computeRSI } from "@/lib/indicators";
@@ -121,53 +123,59 @@ export default function BasketDetail() {
   const [swapTokenIn, setSwapTokenIn] = useState<string | undefined>();
   const [swapTokenOut, setSwapTokenOut] = useState<string | undefined>();
   const [agentActive, setAgentActive] = useState(false);
+  const [scalpingMode, setScalpingMode] = useState(false);
   const toggleAgentMutation = useToggleAgent();
+  const updateScalpingModeMutation = useUpdateScalpingMode();
 
   const { data: basket, isLoading } = useBasket(id);
   const analyzeAndDecideMutation = useAnalyzeAndDecide();
   const { tokens } = useTokenUniverse();
+  const { data: swapReceipts = [] } = useSwapReceipts();
   const agentIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (agentActive) {
-      agentIntervalRef.current = setInterval(() => {
-        const focusAssetId: string = (basket as any)?.focusAsset ?? "";
-        let focusAssetPrice = 0;
-        let indicatorSummary = "RSI=N/A, MACD=N/A, EMA=N/A";
-        if (focusAssetId) {
-          const token = tokens.find((t) => t.address === focusAssetId);
-          focusAssetPrice = token?.priceUsd ?? 0;
-          if (token?.priceUsd) {
-            const prices = buildSyntheticPricesForIndicators(
-              token.priceUsd,
-              token.priceChange24h ?? null,
-            );
-            const rsi = computeRSI(prices);
-            const macd = computeMACD(prices);
-            const ema = computeEMACrossover(prices, 10, 20);
-            indicatorSummary = [
-              `RSI=${rsi != null ? rsi.toFixed(1) : "N/A"}`,
-              `MACD=${macd ? (macd.histogram > 0 ? "bullish" : "bearish") : "N/A"}`,
-              `EMA=${ema?.crossover ?? "N/A"}`,
-            ].join(", ");
+      agentIntervalRef.current = setInterval(
+        () => {
+          const focusAssetId: string = (basket as any)?.focusAsset ?? "";
+          let focusAssetPrice = 0;
+          let indicatorSummary = "RSI=N/A, MACD=N/A, EMA=N/A";
+          if (focusAssetId) {
+            const token = tokens.find((t) => t.address === focusAssetId);
+            focusAssetPrice = token?.priceUsd ?? 0;
+            if (token?.priceUsd) {
+              const prices = buildSyntheticPricesForIndicators(
+                token.priceUsd,
+                token.priceChange24h ?? null,
+              );
+              const rsi = computeRSI(prices);
+              const macd = computeMACD(prices);
+              const ema = computeEMACrossover(prices, 10, 20);
+              indicatorSummary = [
+                `RSI=${rsi != null ? rsi.toFixed(1) : "N/A"}`,
+                `MACD=${macd ? (macd.histogram > 0 ? "bullish" : "bearish") : "N/A"}`,
+                `EMA=${ema?.crossover ?? "N/A"}`,
+              ].join(", ");
+            }
           }
-        }
-        console.log(
-          "[Agent] Basket ID",
-          String(id),
-          "| focusAsset:",
-          focusAssetId || "(none)",
-          `| price: $${focusAssetPrice.toFixed(4)}`,
-          "| indicators:",
-          indicatorSummary,
-        );
-        analyzeAndDecideMutation.mutate({
-          id,
-          isPairTrade: false,
-          focusAssetPrice,
-          indicatorSummary,
-        });
-      }, 60_000);
+          console.log(
+            "[Agent] Basket ID",
+            String(id),
+            "| focusAsset:",
+            focusAssetId || "(none)",
+            `| price: $${focusAssetPrice.toFixed(4)}`,
+            "| indicators:",
+            indicatorSummary,
+          );
+          analyzeAndDecideMutation.mutate({
+            id,
+            isPairTrade: false,
+            focusAssetPrice,
+            indicatorSummary,
+          });
+        },
+        scalpingMode ? 30_000 : 60_000,
+      );
     } else {
       if (agentIntervalRef.current) {
         clearInterval(agentIntervalRef.current);
@@ -178,7 +186,14 @@ export default function BasketDetail() {
       if (agentIntervalRef.current) clearInterval(agentIntervalRef.current);
     };
     // biome-ignore lint/correctness/useExhaustiveDependencies: mutate is stable
-  }, [agentActive, basket, tokens, id, analyzeAndDecideMutation.mutate]);
+  }, [
+    agentActive,
+    scalpingMode,
+    basket,
+    tokens,
+    id,
+    analyzeAndDecideMutation.mutate,
+  ]);
 
   const { data: pairTrades } = usePairTrades();
   const deleteMutation = useDeleteBasket();
@@ -466,6 +481,161 @@ export default function BasketDetail() {
             </button>
           </div>
         </motion.div>
+
+        {/* Scalping/Arbitrage Mode Toggle — only for 3-token baskets */}
+        {basket?.slots && basket.slots.length === 3 && (
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="rounded-xl border p-4"
+            style={{
+              background: "#12121a",
+              borderColor: scalpingMode ? "#7b2fff" : "#1e1e2e",
+            }}
+            data-ocid="basket-detail.scalping.panel"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm font-semibold text-white">
+                  Scalping / Arbitrage Mode
+                </div>
+                <div className="text-xs mt-0.5" style={{ color: "#888" }}>
+                  3-token triangular arbitrage · 30s cycle · 0.5% slippage
+                </div>
+                {scalpingMode && (
+                  <div
+                    className="text-xs mt-1 font-medium"
+                    style={{ color: "#7b2fff" }}
+                  >
+                    ⚡ Scalping Active — 30s cycles
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                data-ocid="basket-detail.scalping.toggle"
+                onClick={() => {
+                  const next = !scalpingMode;
+                  setScalpingMode(next);
+                  updateScalpingModeMutation.mutate({ id, enabled: next });
+                }}
+                className="relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none"
+                style={{
+                  background: scalpingMode ? "#7b2fff" : "#1e1e2e",
+                  border: "1px solid",
+                  borderColor: scalpingMode ? "#7b2fff" : "#333",
+                }}
+              >
+                <span
+                  className="inline-block h-4 w-4 transform rounded-full transition-transform"
+                  style={{
+                    background: "#fff",
+                    transform: scalpingMode
+                      ? "translateX(24px)"
+                      : "translateX(4px)",
+                    boxShadow: scalpingMode ? "0 0 8px #7b2fff" : "none",
+                  }}
+                />
+              </button>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Last Agent Action Banner */}
+        {agentActive && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+            className="rounded-lg border border-[#00f5ff30] bg-[#00f5ff10] p-3 flex items-center gap-2"
+          >
+            <Zap className="h-4 w-4 text-[#00f5ff] flex-shrink-0" />
+            {swapReceipts.length > 0 ? (
+              (() => {
+                const r = [...swapReceipts].sort(
+                  (a, b) => Number(b.timestamp) - Number(a.timestamp),
+                )[0];
+                const symOut =
+                  tokens.find((t) => t.address === r.tokenOut)?.symbol ??
+                  r.tokenOut.slice(0, 6);
+                const price =
+                  tokens.find((t) => t.address === r.tokenOut)?.priceUsd ?? 0;
+                return (
+                  <span className="text-[#00f5ff] text-xs font-medium">
+                    Agent just BOUGHT {Number(r.amountOut).toFixed(2)} {symOut}{" "}
+                    @ ${price.toFixed(2)} — {r.id}
+                  </span>
+                );
+              })()
+            ) : (
+              <span className="text-[#00f5ff80] text-xs">
+                No agent actions yet — waiting for first signal...
+              </span>
+            )}
+          </motion.div>
+        )}
+
+        {/* Agent Activity Log */}
+        <Card className="bg-card border-border">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+              <Zap className="h-3.5 w-3.5 text-[#00f5ff]" />
+              Agent Activity Log
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {swapReceipts.length === 0 ? (
+              <p className="text-xs text-gray-500 text-center py-2">
+                No activity yet
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {[...swapReceipts]
+                  .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+                  .slice(0, 3)
+                  .map((r) => {
+                    const symIn =
+                      tokens.find((t) => t.address === r.tokenIn)?.symbol ??
+                      r.tokenIn.slice(0, 6);
+                    const symOut =
+                      tokens.find((t) => t.address === r.tokenOut)?.symbol ??
+                      r.tokenOut.slice(0, 6);
+                    const msAgo = Date.now() - Number(r.timestamp) / 1_000_000;
+                    const minAgo = Math.floor(msAgo / 60000);
+                    const timeLabel =
+                      minAgo < 1
+                        ? "just now"
+                        : minAgo < 60
+                          ? `${minAgo} min ago`
+                          : `${Math.floor(minAgo / 60)}h ago`;
+                    return (
+                      <div
+                        key={r.id}
+                        className="flex items-center justify-between text-xs p-2 rounded bg-[#0a0a0f] border border-[#1e1e2e]"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#00ff8820] text-[#00ff88]">
+                            BUY
+                          </span>
+                          <span className="text-gray-300">
+                            {Number(r.amountOut).toFixed(4)} {symOut}
+                          </span>
+                          <span className="text-gray-600">←</span>
+                          <span className="text-gray-500">
+                            {Number(r.amountIn).toFixed(4)} {symIn}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[#00f5ff] font-mono">{r.id}</div>
+                          <div className="text-gray-600">{timeLabel}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         <div className="space-y-4">
           {/* Allocation Bar */}
@@ -864,8 +1034,6 @@ export default function BasketDetail() {
           </motion.div>
         </div>
       </div>
-
-      {/* Swap Execution Dialog */}
       <SwapExecutionDialog
         open={swapOpen}
         onClose={() => {

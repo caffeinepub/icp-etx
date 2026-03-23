@@ -1180,3 +1180,20 @@ export function useAnalyzeAndDecide() {
     },
   });
 }
+
+export function useUpdateScalpingMode() {
+  const { actor } = useActor();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      enabled,
+    }: {
+      id: bigint;
+      enabled: boolean;
+    }) => {
+      if (!actor) throw new Error("Actor not available");
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return (actor as any).updateScalpingMode(id, enabled) as Promise<boolean>;
+    },
+  });
+}

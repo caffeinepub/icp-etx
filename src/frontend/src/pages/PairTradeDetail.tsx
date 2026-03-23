@@ -37,6 +37,7 @@ import {
 import {
   useAnalyzeAndDecide,
   useICPPrice,
+  useSwapReceipts,
   useToggleAgent,
   useTokenUniverse,
 } from "../hooks/useQueries";
@@ -148,6 +149,7 @@ export default function PairTradeDetail() {
   const toggleAgentMutation = useToggleAgent();
   const analyzeAndDecideMutation = useAnalyzeAndDecide();
   const { tokens } = useTokenUniverse();
+  const { data: swapReceipts = [] } = useSwapReceipts();
   const agentIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
@@ -390,6 +392,102 @@ export default function PairTradeDetail() {
             </button>
           </div>
         </motion.div>
+
+        {/* Last Agent Action Banner */}
+        {agentActive && (
+          <motion.div
+            initial={{ opacity: 0, y: -8 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.3 }}
+            className="rounded-lg border border-[#00f5ff30] bg-[#00f5ff10] p-3 flex items-center gap-2"
+          >
+            <Zap className="h-4 w-4 text-[#00f5ff] flex-shrink-0" />
+            {swapReceipts.length > 0 ? (
+              (() => {
+                const r = [...swapReceipts].sort(
+                  (a, b) => Number(b.timestamp) - Number(a.timestamp),
+                )[0];
+                const symOut =
+                  tokens.find((t) => t.address === r.tokenOut)?.symbol ??
+                  r.tokenOut.slice(0, 6);
+                const price =
+                  tokens.find((t) => t.address === r.tokenOut)?.priceUsd ?? 0;
+                return (
+                  <span className="text-[#00f5ff] text-xs font-medium">
+                    Agent just BOUGHT {Number(r.amountOut).toFixed(2)} {symOut}{" "}
+                    @ ${price.toFixed(2)} — {r.id}
+                  </span>
+                );
+              })()
+            ) : (
+              <span className="text-[#00f5ff80] text-xs">
+                No agent actions yet — waiting for first signal...
+              </span>
+            )}
+          </motion.div>
+        )}
+
+        {/* Agent Activity Log */}
+        <Card className="bg-card border-border">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm text-muted-foreground uppercase tracking-wider flex items-center gap-2">
+              <Zap className="h-3.5 w-3.5 text-[#00f5ff]" />
+              Agent Activity Log
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {swapReceipts.length === 0 ? (
+              <p className="text-xs text-gray-500 text-center py-2">
+                No activity yet
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {[...swapReceipts]
+                  .sort((a, b) => Number(b.timestamp) - Number(a.timestamp))
+                  .slice(0, 3)
+                  .map((r) => {
+                    const symIn =
+                      tokens.find((t) => t.address === r.tokenIn)?.symbol ??
+                      r.tokenIn.slice(0, 6);
+                    const symOut =
+                      tokens.find((t) => t.address === r.tokenOut)?.symbol ??
+                      r.tokenOut.slice(0, 6);
+                    const msAgo = Date.now() - Number(r.timestamp) / 1_000_000;
+                    const minAgo = Math.floor(msAgo / 60000);
+                    const timeLabel =
+                      minAgo < 1
+                        ? "just now"
+                        : minAgo < 60
+                          ? `${minAgo} min ago`
+                          : `${Math.floor(minAgo / 60)}h ago`;
+                    return (
+                      <div
+                        key={r.id}
+                        className="flex items-center justify-between text-xs p-2 rounded bg-[#0a0a0f] border border-[#1e1e2e]"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-[#00ff8820] text-[#00ff88]">
+                            BUY
+                          </span>
+                          <span className="text-gray-300">
+                            {Number(r.amountOut).toFixed(4)} {symOut}
+                          </span>
+                          <span className="text-gray-600">←</span>
+                          <span className="text-gray-500">
+                            {Number(r.amountIn).toFixed(4)} {symIn}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[#00f5ff] font-mono">{r.id}</div>
+                          <div className="text-gray-600">{timeLabel}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Live Prices */}
         <motion.div

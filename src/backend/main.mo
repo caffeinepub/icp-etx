@@ -220,6 +220,7 @@ actor self {
   var nextBasketId = 1;
   let baskets = Map.empty<Nat, Basket>();
   let basketFocusAssets = Map.empty<Nat, Text>();
+  let basketScalpingModes = Map.empty<Nat, Bool>();
 
   var tradeCountThisMonth : Nat = 0;
   var tradeCountResetAt : Int = 0;
@@ -310,7 +311,7 @@ actor self {
     let nextFire = Nat64.fromNat(nowNat) + fiveMinutesNs;
     setGlobalTimer(nextFire);
     recordSnapshotInternal();
-    runAgentCheckInternal();
+    await runAgentCheckInternal();
   };
 
   // ─── User Profile Methods ────────────────────────────────────────────────────
@@ -661,6 +662,17 @@ actor self {
     };
   };
 
+  public shared ({ caller }) func updateScalpingMode(id : Nat, enabled : Bool) : async Bool {
+    switch (ownerPrincipal) {
+      case (?op) {
+        if (caller != op) { return false };
+        basketScalpingModes.add(id, enabled);
+        true
+      };
+      case null { false };
+    }
+  };
+
   func validateBasketSlotsInternal(slots : [BasketSlot]) : { #ok; #err : Text } {
     if (slots.size() < 3) { return #err("At least 3 basket slots required") };
     if (slots.size() > 10) { return #err("At most 10 basket slots allowed") };
@@ -967,7 +979,7 @@ actor self {
     nextSwapReceiptId += 1;
 
     recordSnapshotInternal();
-    runAgentCheckInternal();
+    ignore runAgentCheckInternal();
 
     execId;
   };
@@ -1039,7 +1051,7 @@ actor self {
       };
     };
     recordSnapshotInternal();
-    runAgentCheckInternal();
+    ignore runAgentCheckInternal();
     "Snapshot recorded. totalValueUsd = " # lastPortfolioValueUsd.toText() # ", total snapshots = " # portfolioSnapshots.size().toText();
   };
 
@@ -1445,18 +1457,108 @@ actor self {
     enabled
   };
 
-  func analyzeAndDecide(id: Nat, isPairTrade: Bool, focusAssetPrice: Float, indicatorSummary: Text) : Text {
+  // Agent swap helper — internal only, uses ownerPrincipal icrc2 approval, no caller check
+  private func _agentSwap(tokenInText : Text, amountIn : Float, tokenOutText : Text, maxSlippage : Float) : async Text {
+    let owner = switch (ownerPrincipal) {
+      case null { return "Error: Owner principal not initialized" };
+      case (?p) { p };
+    };
+    switch (approvedUntil.get(owner)) {
+      case null { return "Error: No trading permission granted" };
+      case (?expiry) { if (Time.now() > expiry) { return "Error: Trading permission expired" } };
+    };
+    let tokenIn = Principal.fromText(tokenInText);
+    let inDecimals = getDecimalsInternal(tokenIn);
+    let amountNat = floatToNat(amountIn, inDecimals);
+    let myPrincipal = Principal.fromActor(self);
+    let ledger = actor(tokenInText) : ICRC2Ledger;
+    switch (await ledger.icrc2_transfer_from({
+      spender_subaccount = null;
+      from = { owner = owner; subaccount = null };
+      to   = { owner = myPrincipal; subaccount = null };
+      amount = amountNat; fee = null; memo = null; created_at_time = null;
+    })) {
+      case (#Err(_)) { return "Error: icrc2_transfer_from failed for agent swap" };
+      case (#Ok(_)) {};
+    };
+    let kong = actor("2ipq2-uqaaa-aaaar-qailq-cai") : KongSwapActor;
+    var amountOut = amountIn * 0.99;
+    var dexTxId = "agent";
+    switch (await kong.swap_async({
+      pay_token = tokenInText; pay_amount = amountNat; pay_tx_id = null;
+      receive_token = tokenOutText; receive_amount = null; receive_address = null;
+      max_slippage = ?maxSlippage; referred_by = null; bypass_amount_check = ?false;
+    })) {
+      case (#Err(e)) { return "Error: KongSwap swap failed: " # e };
+      case (#Ok(reqId)) { dexTxId := reqId.toText() };
+    };
+    var realizedPnL : Float = 0.0;
+    holdings := holdings.map(func(h : Holding) : Holding {
+      if (h.tokenCanisterId == tokenInText) {
+        if (h.costBasis > 0.0) { realizedPnL := amountOut - (amountIn * h.costBasis) };
+        { h with balance = h.balance - amountIn }
+      } else if (h.tokenCanisterId == tokenOutText) {
+        let newBal = h.balance + amountOut;
+        { h with balance = newBal; costBasis = if (newBal == 0.0) 0.0 else (h.balance * h.costBasis + amountIn) / newBal }
+      } else { h }
+    });
+    let execId = "EXEC-" # nextSwapReceiptId.toText() # "-" # dexTxId;
+    swapReceipts := swapReceipts.concat([{
+      id = execId; timestamp = Time.now();
+      tokenIn = tokenInText; amountIn;
+      tokenOut = tokenOutText; amountOut;
+      route = "KongSwap-Agent"; priceImpactPct = 1.0; realizedPnL;
+    }]);
+    nextSwapReceiptId += 1;
+    Debug.print("Agent swap receipt: " # execId);
+    execId
+  };
+
+  func analyzeAndDecide(id: Nat, isPairTrade: Bool, focusAssetPrice: Float, indicatorSummary: Text) : async Text {
     let kind = if (isPairTrade) "PairTrade" else "Basket";
     Debug.print("Analyzing indicators for ID " # id.toText() # " (" # kind # ")...");
     Debug.print("Indicators: " # indicatorSummary);
     Debug.print("Focus price: $" # focusAssetPrice.toText());
 
-    // Parse RSI from summary (e.g. "RSI=42.3, MACD=bearish, ...")
+    // === SCALPING/ARBITRAGE MODE ===
+    if (not isPairTrade) {
+      let isScalping = switch (basketScalpingModes.get(id)) {
+        case (?b) { b };
+        case null { false };
+      };
+      if (isScalping) {
+        switch (baskets.get(id)) {
+          case (?basket) {
+            if (basket.slots.size() == 3) {
+              Debug.print("SCALPING MODE active for basket " # id.toText() # " — triangular arbitrage A->B->C->A (slippage 0.5%)");
+              let tA = switch (pairTrades.get(basket.slots[0].pairTradeId)) { case (?pt) { pt.tokenAAddress }; case null { "" } };
+              let tB = switch (pairTrades.get(basket.slots[1].pairTradeId)) { case (?pt) { pt.tokenAAddress }; case null { "" } };
+              let tC = switch (pairTrades.get(basket.slots[2].pairTradeId)) { case (?pt) { pt.tokenAAddress }; case null { "" } };
+              if (tA != "" and tB != "" and tC != "") {
+                let totalFunded = fundingEntries.foldLeft(0.0, func(acc : Float, e : FundingEntry) : Float { acc + e.amountICP });
+                let scalpAmt = totalFunded * 0.05;
+                if (scalpAmt > 0.01) {
+                  let r1 = await _agentSwap(tA, scalpAmt, tB, 0.5);
+                  Debug.print("Scalp A->B: " # r1);
+                  let r2 = await _agentSwap(tB, scalpAmt * 0.995, tC, 0.5);
+                  Debug.print("Scalp B->C: " # r2);
+                  let r3 = await _agentSwap(tC, scalpAmt * 0.990, tA, 0.5);
+                  Debug.print("Scalp C->A: " # r3);
+                };
+              };
+              return "Decision: SCALP A->B->C->A | Slippage: 0.5% | Focus price: $" # focusAssetPrice.toText();
+            };
+          };
+          case null {};
+        };
+      };
+    };
+    // === END SCALPING MODE ===
+
     var rsiVal : Float = 50.0;
     var macdBullish : Bool = false;
     var macdBearish : Bool = false;
 
-    // Helper: parse float from digit chars using dot notation
     func parseFloat(s: Text) : Float {
       var result : Float = 0.0;
       var decimal : Bool = false;
@@ -1479,7 +1581,6 @@ actor self {
     for (part in indicatorSummary.split(#char ',')) {
       let trimmed = part.trim(#char ' ');
       if (trimmed.startsWith(#text "RSI=")) {
-        // Extract value after "RSI=" by splitting on "="
         var skipFirst = true;
         for (ep in trimmed.split(#char '=')) {
           if (skipFirst) { skipFirst := false }
@@ -1510,13 +1611,41 @@ actor self {
     };
 
     Debug.print("Decision: " # decision # " | RSI=" # rsiVal.toText() # " | Focus price: $" # focusAssetPrice.toText());
+
+    // Execute the decision if a real focusAsset canister ID is available
+    if (focusLabel != "focusAsset") {
+      let icpCid = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+      if (decision == "BUY " # focusLabel) {
+        let totalFunded = fundingEntries.foldLeft(0.0, func(acc : Float, e) { acc + e.amountICP });
+        let icpSpent = swapReceipts.foldLeft(0.0, func(acc : Float, r) {
+          if (r.tokenIn == icpCid) { acc + r.amountIn } else { acc }
+        });
+        let buyAmt = (totalFunded - icpSpent) * 0.5;
+        if (buyAmt > 0.0) {
+          let receipt = await _agentSwap(icpCid, buyAmt, focusLabel, 2.0);
+          Debug.print("Agent BUY executed: " # receipt);
+        };
+      } else if (decision == "SELL " # focusLabel) {
+        switch (holdings.find(func(h : Holding) : Bool { h.tokenCanisterId == focusLabel })) {
+          case (?h) {
+            let sellAmt = h.balance * 0.2;
+            if (sellAmt > 0.0) {
+              let receipt = await _agentSwap(focusLabel, sellAmt, icpCid, 2.0);
+              Debug.print("Agent SELL executed: " # receipt);
+            };
+          };
+          case null {};
+        };
+      };
+    };
+
     "Decision: " # decision # " | Focus price: $" # focusAssetPrice.toText()
   };
 
-  func runAgentCheckInternal() : () {
+  func runAgentCheckInternal() : async () {
     for ((id, isEnabled) in agentEnabled.entries()) {
       if (isEnabled) {
-        let decision = analyzeAndDecide(id, true, 0.0, "no summary provided");
+        let decision = await analyzeAndDecide(id, true, 0.0, "no summary provided");
         Debug.print("Agent check for ID " # id.toText() # " => " # decision);
       };
     };
