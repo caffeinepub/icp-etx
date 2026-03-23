@@ -116,7 +116,7 @@ actor self {
   // ─── ckETH Minter Interface ─────────────────────────────────────────────────
   // Official ckETH minter: sv3dd-oaaaa-aaaar-qacoa-cai
   type CkEthMinterActor = actor {
-    get_eth_address : () -> async { #Ok : Text; #Err : Text };
+    smart_contract_address : () -> async Text;
     update_balance : () -> async { #Ok : { block_index : Nat; amount : Nat }; #Err : Text };
   };
 
@@ -1158,10 +1158,7 @@ actor self {
   public shared func getEthDepositAddress() : async Text {
     let minter = actor("sv3dd-oaaaa-aaaar-qacoa-cai") : CkEthMinterActor;
     try {
-      switch (await minter.get_eth_address()) {
-        case (#Ok(addr)) { addr };
-        case (#Err(e)) { "Error: " # e };
-      };
+      await minter.smart_contract_address();
     } catch (e) {
       "Error: Could not retrieve ETH deposit address. " # e.message();
     };
