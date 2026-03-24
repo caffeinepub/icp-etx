@@ -77,6 +77,13 @@ actor self {
     icrc1_transfer : (ICRC1TransferArgs) -> async { #Ok : Nat; #Err : ICRC1TransferError };
   };
 
+  // Old NNS ICP ledger interface (more reliable than ICRC-1 for account_balance queries)
+  type OldAccountIdentifier = { hash : [Nat8] };
+  type OldTokens = { e8s : Nat64 };
+  type OldIcpLedger = actor {
+    account_balance : (OldAccountIdentifier) -> async OldTokens;
+  };
+
   // KongSwap router: 2ipq2-uqaaa-aaaar-qailq-cai
   type KongSwapArgs = {
     pay_token : Text;
@@ -1178,21 +1185,20 @@ actor self {
         if (caller != owner) { return "Unauthorized: this platform is single-user only." };
       };
     };
-    // ── Query ICP ledger using explicit Account record ─────────────────────────
+    // ── Query ICP ledger using ICRC-1 icrc1_balance_of with canister's own principal ──
     let icpCid = "ryjl3-tyaaa-aaaaa-aaaba-cai";
-    let canisterPrincipal = Principal.fromActor(self);
     var icpBalance : Float = 0.0;
     var querySucceeded = false;
     var errorMsg = "";
 
-    // Log before the call
-    Debug.print("Querying ledger with Account record: owner=" # canisterPrincipal.toText() # " subaccount=null");
+    let selfPrincipal = Principal.fromActor(self);
+    let zeroSubaccount : Blob = Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+    Debug.print("Querying ledger with 32-byte subaccount for principal: " # selfPrincipal.toText());
 
     try {
       let icpLedger : ICRC1Ledger = actor(icpCid);
-      let accountRecord = { owner = canisterPrincipal; subaccount = null };
-      let result = await icpLedger.icrc1_balance_of(accountRecord);
-      icpBalance := natToFloat(result, 8);
+      let rawBalance : Nat = await icpLedger.icrc1_balance_of({ owner = selfPrincipal; subaccount = ?zeroSubaccount });
+      icpBalance := natToFloat(rawBalance, 8);
       Debug.print("Raw ledger balance returned: " # icpBalance.toText() # " ICP");
       querySucceeded := true;
     } catch (e) {
@@ -1200,7 +1206,7 @@ actor self {
       Debug.print("syncBalances: ICP ledger query failed: " # errorMsg);
     };
 
-    // ── Always force create/update the ICP holding (even if balance is 0) ──────
+    // ── Always force create/update the ICP holding ────────────────────────────
     let hasIcp = holdings.any(func(h : Holding) : Bool { h.tokenCanisterId == icpCid });
     if (hasIcp) {
       holdings := holdings.map(func(h : Holding) : Holding {
