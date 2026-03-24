@@ -1,4 +1,5 @@
 import Float "mo:core/Float";
+import Blob "mo:core/Blob";
 import Nat "mo:core/Nat";
 import Nat64 "mo:core/Nat64";
 import Time "mo:core/Time";
@@ -866,7 +867,7 @@ actor self {
     let tokenInLedger = actor(tokenIn.toText()) : ICRC2Ledger;
 
     let transferResult = await tokenInLedger.icrc2_transfer_from({
-      spender_subaccount = null;
+      spender_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
       from = { owner = caller; subaccount = null };
       to = { owner = myPrincipal; subaccount = null };
       amount = amountNat;
@@ -1145,7 +1146,7 @@ actor self {
     try {
       await minter.get_btc_address({
         owner = ?Principal.fromActor(self);
-        subaccount = null;
+        subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
       });
     } catch (e) {
       "Error: Could not retrieve BTC deposit address. " # e.message();
@@ -1185,7 +1186,7 @@ actor self {
       let icpLedger : ICRC1Ledger = actor(icpCid);
       let rawBalance = await icpLedger.icrc1_balance_of({
         owner = Principal.fromActor(self);
-        subaccount = null;
+        subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
       });
       icpBalance := natToFloat(rawBalance, 8);
       icpSynced := true;
@@ -1247,7 +1248,7 @@ actor self {
       amount = amountNat;
       fee = null;
       memo = null;
-      from_subaccount = null;
+      from_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
       created_at_time = null;
     });
     switch (result) {
@@ -1282,7 +1283,7 @@ actor self {
     try {
       let result = await minter.update_balance({
         owner = ?Principal.fromActor(self);
-        subaccount = null;
+        subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
       });
       switch (result) {
         case (#Ok(r)) {
@@ -1383,7 +1384,7 @@ actor self {
 
       let srcLedger = actor(sourceToken.toText()) : ICRC2Ledger;
       let pullResult = await srcLedger.icrc2_transfer_from({
-        spender_subaccount = null;
+        spender_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
         from = { owner = owner; subaccount = null };
         to   = { owner = myPrincipal; subaccount = null };
         amount = amountNat;
@@ -1433,7 +1434,7 @@ actor self {
       amount = outNat;
       fee  = null;
       memo = null;
-      from_subaccount = null;
+      from_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
       created_at_time = null;
     });
 
@@ -1482,7 +1483,7 @@ actor self {
     let myPrincipal = Principal.fromActor(self);
     let ledger = actor(tokenInText) : ICRC2Ledger;
     switch (await ledger.icrc2_transfer_from({
-      spender_subaccount = null;
+      spender_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
       from = { owner = owner; subaccount = null };
       to   = { owner = myPrincipal; subaccount = null };
       amount = amountNat; fee = null; memo = null; created_at_time = null;
