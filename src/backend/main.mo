@@ -867,7 +867,7 @@ actor self {
     let tokenInLedger = actor(tokenIn.toText()) : ICRC2Ledger;
 
     let transferResult = await tokenInLedger.icrc2_transfer_from({
-      spender_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+      spender_subaccount = null;
       from = { owner = caller; subaccount = null };
       to = { owner = myPrincipal; subaccount = null };
       amount = amountNat;
@@ -1146,7 +1146,7 @@ actor self {
     try {
       await minter.get_btc_address({
         owner = ?Principal.fromActor(self);
-        subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+        subaccount = null;
       });
     } catch (e) {
       "Error: Could not retrieve BTC deposit address. " # e.message();
@@ -1178,41 +1178,49 @@ actor self {
         if (caller != owner) { return "Unauthorized: this platform is single-user only." };
       };
     };
-    // ── Query ICP ledger for canister's real balance (subaccount 0) ──────────
+    // ── Query ICP ledger using explicit Account record ─────────────────────────
     let icpCid = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+    let canisterPrincipal = Principal.fromActor(self);
     var icpBalance : Float = 0.0;
-    var icpSynced = false;
+    var querySucceeded = false;
+    var errorMsg = "";
+
+    // Log before the call
+    Debug.print("Querying ledger with Account record: owner=" # canisterPrincipal.toText() # " subaccount=null");
+
     try {
       let icpLedger : ICRC1Ledger = actor(icpCid);
-      let rawBalance = await icpLedger.icrc1_balance_of({
-        owner = Principal.fromActor(self);
-        subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
-      });
-      icpBalance := natToFloat(rawBalance, 8);
-      icpSynced := true;
+      let accountRecord = { owner = canisterPrincipal; subaccount = null };
+      let result = await icpLedger.icrc1_balance_of(accountRecord);
+      icpBalance := natToFloat(result, 8);
+      Debug.print("Raw ledger balance returned: " # icpBalance.toText() # " ICP");
+      querySucceeded := true;
     } catch (e) {
-      Debug.print("syncBalances: ICP ledger query failed: " # e.message());
+      errorMsg := e.message();
+      Debug.print("syncBalances: ICP ledger query failed: " # errorMsg);
     };
-    // ── Upsert ICP holding outside try/catch so no await-rollback risk ───────
-    if (icpSynced) {
-      let hasIcp = holdings.any(func(h : Holding) : Bool { h.tokenCanisterId == icpCid });
-      if (hasIcp) {
-        holdings := holdings.map(func(h : Holding) : Holding {
-          if (h.tokenCanisterId == icpCid) { { h with balance = icpBalance } }
-          else { h };
-        });
-      } else {
-        holdings := holdings.concat([{
-          tokenCanisterId = icpCid;
-          symbol = "ICP";
-          balance = icpBalance;
-          costBasis = 0.0;
-        }]);
-      };
-      Debug.print("Synced " # icpBalance.toText() # " ICP from ledger – external deposit detected");
-      "Synced " # icpBalance.toText() # " ICP from ledger.";
+
+    // ── Always force create/update the ICP holding (even if balance is 0) ──────
+    let hasIcp = holdings.any(func(h : Holding) : Bool { h.tokenCanisterId == icpCid });
+    if (hasIcp) {
+      holdings := holdings.map(func(h : Holding) : Holding {
+        if (h.tokenCanisterId == icpCid) { { h with balance = icpBalance } }
+        else { h };
+      });
     } else {
-      "Sync failed: could not reach ICP ledger.";
+      holdings := holdings.concat([{
+        tokenCanisterId = icpCid;
+        symbol = "ICP";
+        balance = icpBalance;
+        costBasis = 0.0;
+      }]);
+    };
+    Debug.print("Holding force-updated with " # icpBalance.toText() # " ICP from ledger");
+
+    if (querySucceeded) {
+      "Raw ledger balance returned: " # icpBalance.toText() # " ICP";
+    } else {
+      "Sync attempted (query failed: " # errorMsg # ") — holding set to 0";
     };
   };
 
@@ -1248,7 +1256,7 @@ actor self {
       amount = amountNat;
       fee = null;
       memo = null;
-      from_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+      from_subaccount = null;
       created_at_time = null;
     });
     switch (result) {
@@ -1283,7 +1291,7 @@ actor self {
     try {
       let result = await minter.update_balance({
         owner = ?Principal.fromActor(self);
-        subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+        subaccount = null;
       });
       switch (result) {
         case (#Ok(r)) {
@@ -1384,7 +1392,7 @@ actor self {
 
       let srcLedger = actor(sourceToken.toText()) : ICRC2Ledger;
       let pullResult = await srcLedger.icrc2_transfer_from({
-        spender_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+        spender_subaccount = null;
         from = { owner = owner; subaccount = null };
         to   = { owner = myPrincipal; subaccount = null };
         amount = amountNat;
@@ -1434,7 +1442,7 @@ actor self {
       amount = outNat;
       fee  = null;
       memo = null;
-      from_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+      from_subaccount = null;
       created_at_time = null;
     });
 
@@ -1483,7 +1491,7 @@ actor self {
     let myPrincipal = Principal.fromActor(self);
     let ledger = actor(tokenInText) : ICRC2Ledger;
     switch (await ledger.icrc2_transfer_from({
-      spender_subaccount = ?Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
+      spender_subaccount = null;
       from = { owner = owner; subaccount = null };
       to   = { owner = myPrincipal; subaccount = null };
       amount = amountNat; fee = null; memo = null; created_at_time = null;

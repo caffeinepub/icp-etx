@@ -1279,6 +1279,22 @@ export default function WalletPage() {
                 </span>
               )}
             </div>
+            {syncBalances.isSuccess && syncBalances.data && (
+              <div
+                className="rounded-lg px-3 py-2 text-sm font-mono"
+                style={{
+                  background: "rgba(0,0,0,0.3)",
+                  border: `1px solid ${syncBalances.data.includes("0.0000") || syncBalances.data.includes("0 ICP") ? "rgba(255,59,48,0.3)" : "rgba(0,255,136,0.3)"}`,
+                  color:
+                    syncBalances.data.includes("0.0000") ||
+                    syncBalances.data.includes("0 ICP")
+                      ? "#ff3b30"
+                      : "#00ff88",
+                }}
+              >
+                {syncBalances.data}
+              </div>
+            )}
             {holdings.length === 0 ? (
               <div
                 className="rounded-xl border p-10 text-center"
