@@ -26,30 +26,8 @@ export function useActor() {
       };
 
       const actor = await createActorWithConfig(actorOptions);
-
-      // Wrap access control init in try/catch — backend rejects empty secret
-      // but we must NOT let this block actor initialization
       const adminToken = getSecretParameter("caffeineAdminToken") || "";
-      try {
-        await actor._initializeAccessControlWithSecret(adminToken);
-      } catch (err) {
-        console.error(
-          "[useActor] _initializeAccessControlWithSecret failed (non-fatal):",
-          err,
-        );
-      }
-
-      // Auto-sync balances after actor is ready so external deposits appear immediately
-      try {
-        await actor.syncBalances();
-        console.log("[useActor] syncBalances() called on actor init");
-      } catch (err) {
-        console.error(
-          "[useActor] syncBalances() failed on init (non-fatal):",
-          err,
-        );
-      }
-
+      await actor._initializeAccessControlWithSecret(adminToken);
       return actor;
     },
     // Only refetch when identity changes
