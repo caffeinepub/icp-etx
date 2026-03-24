@@ -1177,8 +1177,9 @@ actor self {
         if (caller != owner) { return "Unauthorized: this platform is single-user only." };
       };
     };
-    // ── Step 1: Always query ICP ledger for canister's real balance ──────────
+    // ── Query ICP ledger for canister's real balance (subaccount 0) ──────────
     let icpCid = "ryjl3-tyaaa-aaaaa-aaaba-cai";
+    var icpBalance : Float = 0.0;
     var icpSynced = false;
     try {
       let icpLedger : ICRC1Ledger = actor(icpCid);
@@ -1186,57 +1187,31 @@ actor self {
         owner = Principal.fromActor(self);
         subaccount = null;
       });
-      let floatBalance = natToFloat(rawBalance, 8);
+      icpBalance := natToFloat(rawBalance, 8);
+      icpSynced := true;
+    } catch (e) {
+      Debug.print("syncBalances: ICP ledger query failed: " # e.message());
+    };
+    // ── Upsert ICP holding outside try/catch so no await-rollback risk ───────
+    if (icpSynced) {
       let hasIcp = holdings.any(func(h : Holding) : Bool { h.tokenCanisterId == icpCid });
       if (hasIcp) {
         holdings := holdings.map(func(h : Holding) : Holding {
-          if (h.tokenCanisterId == icpCid) { { h with balance = floatBalance } }
+          if (h.tokenCanisterId == icpCid) { { h with balance = icpBalance } }
           else { h };
         });
       } else {
         holdings := holdings.concat([{
           tokenCanisterId = icpCid;
           symbol = "ICP";
-          balance = floatBalance;
+          balance = icpBalance;
           costBasis = 0.0;
         }]);
       };
-      Debug.print("Synced " # floatBalance.toText() # " ICP from ledger – external deposit detected");
-      icpSynced := true;
-    } catch (e) {
-      Debug.print("syncBalances: ICP ledger query failed: " # e.message());
-    };
-    // ── Step 2: Sync remaining existing holdings ─────────────────────────────
-    var updatedCount = 0;
-    var newHoldings : [Holding] = holdings;
-    for (holding in holdings.vals()) {
-      if (holding.tokenCanisterId == icpCid) {
-        updatedCount += 1; // already handled above
-      } else {
-        try {
-          let ledger : ICRC1Ledger = actor(holding.tokenCanisterId);
-          let balance = await ledger.icrc1_balance_of({
-            owner = Principal.fromActor(self);
-            subaccount = null;
-          });
-          let decimalsVal : Nat8 = switch (decimalsRegistry.get(Principal.fromText(holding.tokenCanisterId))) {
-            case (?d) { d };
-            case (null) { 8 };
-          };
-          let floatBalance = natToFloat(balance, decimalsVal);
-          newHoldings := newHoldings.map(func(h : Holding) : Holding {
-            if (h.tokenCanisterId == holding.tokenCanisterId) { { h with balance = floatBalance } }
-            else { h };
-          });
-          updatedCount += 1;
-        } catch (_) {};
-      };
-    };
-    holdings := newHoldings;
-    if (icpSynced) {
-      "Synced ICP from ledger + " # updatedCount.toText() # " token(s).";
+      Debug.print("Synced " # icpBalance.toText() # " ICP from ledger – external deposit detected");
+      "Synced " # icpBalance.toText() # " ICP from ledger.";
     } else {
-      "Synced " # updatedCount.toText() # " token balance(s).";
+      "Sync failed: could not reach ICP ledger.";
     };
   };
 

@@ -1,22 +1,23 @@
 # ICP ETX
 
 ## Current State
-Version 46 with scalping toggle live. The `analyzeAndDecide` scalping branch logs a stub decision and returns early — no real swaps are executed. `_agentSwap` exists with 2% slippage hardcoded.
+Version 67 live. `syncBalances()` exists and queries the ICP ledger, but state mutations and Debug.print happen inside the try/catch block — if `floatBalance.toText()` (instance method) causes any issue after the `await`, the holdings update gets rolled back within that continuation. User deposited 9.43 ICP to canister principal but it does not appear in Holdings.
 
 ## Requested Changes (Diff)
 
 ### Add
-- Real triangular arbitrage execution inside the scalping branch: resolves 3 token addresses from basket slots via pairTrades lookup, executes A→B, B→C, C→A using `_agentSwap` with 0.5% slippage, creates EXEC-XXXX receipts for each leg
+- Nothing new
 
 ### Modify
-- `_agentSwap`: add `maxSlippage: Float` parameter; replace hardcoded `?2.0` with `?maxSlippage`
-- Existing BUY/SELL call sites in `analyzeAndDecide`: pass `2.0` explicitly
-- Scalping branch in `analyzeAndDecide`: replace stub early-return with real 3-leg swap execution
+- `syncBalances()` in main.mo: rewrite to move holdings mutation AFTER the try/catch (in an `if (icpSynced)` block), use `Float.toText(icpBalance)` static call, and store `rawBalance` outside the try block so it's safely accessible
 
 ### Remove
-- Stub log-only scalping branch
+- Nothing
 
 ## Implementation Plan
-1. Patch `_agentSwap` signature and internals (5 targeted edits to main.mo)
-2. Update BUY/SELL call sites to pass slippage=2.0
-3. Replace scalping stub with real triangular execution at 0.5% slippage
+1. Replace lines 1173–1241 in main.mo with a clean `syncBalances` that:
+   - Queries ICP ledger inside try/catch (only the async call)
+   - Sets `icpBalance` and `icpSynced` from the result
+   - Updates/creates the ICP holding OUTSIDE the try/catch in an `if (icpSynced)` block
+   - Logs `"Synced X.XXXX ICP from ledger – external deposit detected"` using `Float.toText()`
+   - Returns status text
