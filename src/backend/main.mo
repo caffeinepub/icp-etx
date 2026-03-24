@@ -1193,13 +1193,14 @@ actor self {
 
     let selfPrincipal = Principal.fromActor(self);
     let zeroSubaccount : Blob = Blob.fromArray(Array.tabulate<Nat8>(32, func _ = 0));
-    Debug.print("Querying ledger with 32-byte subaccount for principal: " # selfPrincipal.toText());
+    let canisterPrincipal = selfPrincipal;
+    Debug.print("Querying ledger with 32-byte subaccount for canister principal: " # canisterPrincipal.toText());
 
     try {
       let icpLedger : ICRC1Ledger = actor(icpCid);
       let rawBalance : Nat = await icpLedger.icrc1_balance_of({ owner = selfPrincipal; subaccount = ?zeroSubaccount });
       icpBalance := natToFloat(rawBalance, 8);
-      Debug.print("Raw ledger balance returned: " # icpBalance.toText() # " ICP");
+      Debug.print("Raw ledger balance returned: " # icpBalance.toText() # " ICP (raw e8s: " # rawBalance.toText() # ")");
       querySucceeded := true;
     } catch (e) {
       errorMsg := e.message();
